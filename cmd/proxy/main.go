@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -70,6 +74,43 @@ func runProxy(cmd *cobra.Command, args []string) {
 		ReadHeaderTimeout: internal.HttpReadTimeout,
 	}
 
-	log.Printf("Proxy running on :%s (kafka=%s redis=%s)", port, kafkaAddr, redisAddr)
-	log.Fatal(srv.ListenAndServe())
+	// Setup graceful shutdown
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+
+	// Start server in a goroutine
+	go func() {
+		log.Printf("Proxy running on :%s (kafka=%s redis=%s)", port, kafkaAddr, redisAddr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("HTTP server error: %v", err)
+		}
+	}()
+
+	// Wait for interrupt signal
+	<-sigCh
+	log.Println("Shutdown signal received, gracefully shutting down...")
+
+	// Create shutdown context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), internal.ShutdownTimeout)
+	defer cancel()
+
+	// Shutdown HTTP server
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("HTTP server shutdown error: %v", err)
+	}
+
+	// Close handler (cancels context and stops kafka workers)
+	handler.Close()
+
+	// Close Kafka producer
+	if err := producer.Close(ctx); err != nil {
+		log.Printf("Kafka producer close error: %v", err)
+	}
+
+	// Close Redis store
+	if err := store.Close(ctx); err != nil {
+		log.Printf("Redis store close error: %v", err)
+	}
+
+	log.Println("Proxy shutdown complete")
 }

@@ -18,20 +18,6 @@ type ErrorResponse struct {
 	Error string `json:"error"`
 }
 
-type Response struct {
-	Status    string      `json:"status,omitempty"`
-	RequestID string      `json:"request_id,omitempty"`
-	Error     string      `json:"error,omitempty"`
-	Result    interface{} `json:"result,omitempty"`
-}
-
-func (r *Response) Reset() {
-	r.Status = ""
-	r.RequestID = ""
-	r.Error = ""
-	r.Result = nil
-}
-
 type Handler struct {
 	producer  *kafka.Producer
 	store     *redis.Store
@@ -39,21 +25,27 @@ type Handler struct {
 
 	kafkaCh   chan *internal.KafkaMessage
 	onceStart sync.Once
+	ctx       context.Context
+	cancel    context.CancelFunc
 }
 
 func NewHandler(p *kafka.Producer, s *redis.Store, maxConcurrent int, kafkaWorkers int) *Handler {
 	if maxConcurrent <= 0 {
-		maxConcurrent = 1000
+		maxConcurrent = internal.DefaultMaxConcurrent
 	}
 	if kafkaWorkers <= 0 {
-		kafkaWorkers = 32
+		kafkaWorkers = internal.DefaultKafkaWorkers
 	}
+
+	ctx, cancel := context.WithCancel(context.Background())
 
 	h := &Handler{
 		producer:  p,
 		store:     s,
 		semaphore: make(chan struct{}, maxConcurrent),
-		kafkaCh:   make(chan *internal.KafkaMessage, maxConcurrent*2),
+		kafkaCh:   make(chan *internal.KafkaMessage, maxConcurrent*internal.KafkaChannelMultiplier),
+		ctx:       ctx,
+		cancel:    cancel,
 	}
 
 	h.startKafkaWorkers(kafkaWorkers)
@@ -70,36 +62,49 @@ func (h *Handler) startKafkaWorkers(n int) {
 
 func (h *Handler) kafkaWorker() {
 	buf := make([]byte, internal.DefaultBufSize)
-	bgCtx := context.Background()
 
 	for msg := range h.kafkaCh {
 		b, err := sonic.Marshal(msg)
 		if err != nil {
-			redisCtx, cancel := context.WithTimeout(bgCtx, internal.RedisTimeout)
-			_ = h.store.SetStatus(redisCtx, msg.RequestID, "failed: marshal error", internal.StatusTTL)
+			redisCtx, cancel := context.WithTimeout(h.ctx, internal.RedisTimeout)
+			_ = h.store.SaveResponse(redisCtx, &internal.Response{
+				Status:    "failed",
+				RequestID: msg.RequestID,
+				Error:     "marshal error",
+			}, internal.StatusTTL)
 			cancel()
 			continue
 		}
 
 		if len(b) > len(buf) {
-			redisCtx, cancel := context.WithTimeout(bgCtx, internal.RedisTimeout)
-			_ = h.store.SetStatus(redisCtx, msg.RequestID, "failed: payload too large > %d KB", internal.DefaultBufSize/1024)
+			redisCtx, cancel := context.WithTimeout(h.ctx, internal.RedisTimeout)
+			_ = h.store.SaveResponse(redisCtx, &internal.Response{
+				Status:    "failed",
+				RequestID: msg.RequestID,
+				Error:     "payload too large",
+			}, internal.StatusTTL)
 			cancel()
 			continue
 		}
 
 		n := copy(buf, b)
 
-		deadline := time.Now().Add(internal.KafkaTimeout)
-		kafkaCtx, kcancel := context.WithDeadline(bgCtx, deadline)
+		kafkaCtx, kcancel := context.WithTimeout(h.ctx, internal.KafkaTimeout)
 		err = h.producer.SendWithContext(kafkaCtx, msg.RequestID, buf[:n])
 		kcancel()
 
-		redisCtx, rcancel := context.WithTimeout(bgCtx, internal.RedisTimeout)
+		redisCtx, rcancel := context.WithTimeout(h.ctx, internal.RedisTimeout)
 		if err != nil {
-			_ = h.store.SetStatus(redisCtx, msg.RequestID, "failed: "+err.Error(), internal.StatusTTL)
+			_ = h.store.SaveResponse(redisCtx, &internal.Response{
+				Status:    "failed",
+				RequestID: msg.RequestID,
+				Error:     err.Error(),
+			}, internal.StatusTTL)
 		} else {
-			_ = h.store.SetStatus(redisCtx, msg.RequestID, "queued", internal.StatusTTL)
+			_ = h.store.SaveResponse(redisCtx, &internal.Response{
+				Status:    "queued",
+				RequestID: msg.RequestID,
+			}, internal.StatusTTL)
 		}
 		rcancel()
 	}
@@ -115,7 +120,9 @@ func (h *Handler) HandleRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	raw, err := io.ReadAll(r.Body)
+	// only read limited size
+	limitedBody := io.LimitReader(r.Body, internal.MaxUpstreamRequestSize+1)
+	raw, err := io.ReadAll(limitedBody)
 	if err != nil || len(raw) == 0 {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = sonic.ConfigDefault.NewEncoder(w).Encode(ErrorResponse{Error: "invalid request body"})
@@ -136,7 +143,10 @@ func (h *Handler) HandleRPC(w http.ResponseWriter, r *http.Request) {
 	redisCtx, redisCancel := context.WithTimeout(r.Context(), internal.RedisTimeout)
 	defer redisCancel()
 
-	if err := h.store.SetStatus(redisCtx, reqID, "pending", internal.StatusTTL); err != nil {
+	if err := h.store.SaveResponse(redisCtx, &internal.Response{
+		Status:    "pending",
+		RequestID: reqID,
+	}, internal.StatusTTL); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = sonic.ConfigDefault.NewEncoder(w).Encode(ErrorResponse{Error: "failed to initialize request"})
 		return
@@ -156,13 +166,11 @@ func (h *Handler) HandleRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := Response{
+	w.Header().Set("Content-Type", "application/json")
+	_ = sonic.ConfigDefault.NewEncoder(w).Encode(&internal.Response{
 		Status:    "accepted",
 		RequestID: reqID,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = sonic.ConfigDefault.NewEncoder(w).Encode(&resp)
+	})
 }
 
 func (h *Handler) HandleResult(w http.ResponseWriter, r *http.Request) {
@@ -176,45 +184,30 @@ func (h *Handler) HandleResult(w http.ResponseWriter, r *http.Request) {
 	redisCtx, redisCancel := context.WithTimeout(r.Context(), internal.RedisTimeout)
 	defer redisCancel()
 
-	// Check status first using strong-typed struct
-	st, statusErr := h.store.GetStatus(redisCtx, requestID)
-	if statusErr == nil && st != nil {
-		// Status exists - check if it's failed or pending
-		if st.Status == "pending" {
-			w.WriteHeader(http.StatusAccepted)
-			_ = sonic.ConfigDefault.NewEncoder(w).Encode(Response{
-				Status:    "pending",
-				RequestID: requestID,
-			})
-			return
-		}
-		if st.Status == "queued" {
-			w.WriteHeader(http.StatusAccepted)
-			_ = sonic.ConfigDefault.NewEncoder(w).Encode(Response{
-				Status:    st.Status,
-				RequestID: requestID,
-			})
-			return
-		}
-		if len(st.Status) > 7 && st.Status[:7] == "failed:" {
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = sonic.ConfigDefault.NewEncoder(w).Encode(Response{
-				Status:    "failed",
-				RequestID: requestID,
-				Error:     st.Status[8:], // Remove "failed: " prefix
-			})
-			return
-		}
-	}
-
-	// Try to get the actual result
-	result, err := h.store.GetWithContext(redisCtx, requestID)
+	// Get unified response
+	resp, err := h.store.GetResponse(redisCtx, requestID)
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
-		_ = sonic.ConfigDefault.NewEncoder(w).Encode(ErrorResponse{Error: "result not found or not ready yet"})
+		_ = sonic.ConfigDefault.NewEncoder(w).Encode(ErrorResponse{Error: "request not found"})
 		return
 	}
 
+	// Return appropriate status code based on response status
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(result)
+	switch resp.Status {
+	case "pending", "queued":
+		w.WriteHeader(http.StatusAccepted)
+	case "failed":
+		w.WriteHeader(http.StatusInternalServerError)
+	case "completed":
+		w.WriteHeader(http.StatusOK)
+	default:
+		w.WriteHeader(http.StatusOK)
+	}
+	_ = sonic.ConfigDefault.NewEncoder(w).Encode(resp)
+}
+
+func (h *Handler) Close() {
+	h.cancel()       // Cancel parent context
+	close(h.kafkaCh) // Close kafka channel to stop workers
 }

@@ -5,7 +5,6 @@ import (
 	"context"
 	"io"
 	"net/http"
-	"time"
 
 	"drpc_proxy.com/internal"
 	"drpc_proxy.com/internal/redis"
@@ -14,19 +13,28 @@ import (
 
 var upstreamClient = &http.Client{
 	Transport: &http.Transport{
-		MaxIdleConns:        1000,
-		MaxIdleConnsPerHost: 1000,
-		MaxConnsPerHost:     1000,
-		IdleConnTimeout:     90 * time.Second,
+		MaxIdleConns:          internal.UpstreamMaxIdleConns,
+		MaxIdleConnsPerHost:   internal.UpstreamMaxIdleConnsPerHost,
+		MaxConnsPerHost:       internal.UpstreamMaxConnsPerHost,
+		IdleConnTimeout:       internal.UpstreamIdleConnTimeout,
+		TLSHandshakeTimeout:   internal.UpstreamTLSHandshakeTimeout,
+		ResponseHeaderTimeout: internal.UpstreamResponseHeaderTimeout,
 	},
 }
 
 type Processor struct {
-	store *redis.Store
+	store  *redis.Store
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 func NewProcessor(store *redis.Store) *Processor {
-	return &Processor{store: store}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Processor{
+		store:  store,
+		ctx:    ctx,
+		cancel: cancel,
+	}
 }
 
 func (p *Processor) Process(msg []byte) error {
@@ -39,7 +47,7 @@ func (p *Processor) Process(msg []byte) error {
 	rpcPayload := m.Raw
 
 	// Upstream request
-	upstreamCtx, upstreamCancel := context.WithTimeout(context.Background(), internal.UpstreamTimeout)
+	upstreamCtx, upstreamCancel := context.WithTimeout(p.ctx, internal.UpstreamTimeout)
 	defer upstreamCancel()
 
 	req, err := http.NewRequestWithContext(upstreamCtx, "POST", internal.UpstreamURL, bytes.NewReader(rpcPayload))
@@ -62,9 +70,17 @@ func (p *Processor) Process(msg []byte) error {
 		return err
 	}
 
-	// Save to Redis
-	redisCtx, redisCancel := context.WithTimeout(context.Background(), internal.RedisTimeout)
+	// Save to Redis with completed status
+	redisCtx, redisCancel := context.WithTimeout(p.ctx, internal.RedisTimeout)
 	defer redisCancel()
 
-	return p.store.SaveWithContext(redisCtx, m.RequestID, body, internal.ResultTTL)
+	return p.store.SaveResponse(redisCtx, &internal.Response{
+		Status:    "completed",
+		RequestID: m.RequestID,
+		Result:    body,
+	}, internal.ResultTTL)
+}
+
+func (p *Processor) Close() {
+	p.cancel() // Cancel parent context
 }

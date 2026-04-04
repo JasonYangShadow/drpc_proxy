@@ -2,34 +2,43 @@ package kafka
 
 import (
 	"context"
-	"time"
 
+	"drpc_proxy.com/internal"
 	"github.com/segmentio/kafka-go"
 )
 
 type Producer struct {
 	writer *kafka.Writer
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 func NewProducer(broker string) (*Producer, error) {
 	w := &kafka.Writer{
 		Addr:         kafka.TCP(broker),
-		Topic:        "rpc_requests",
+		Topic:        internal.KafkaTopic,
 		Balancer:     &kafka.Hash{},
 		Async:        false,
-		BatchSize:    100, // batch up to 100 messages
-		BatchTimeout: 10 * time.Millisecond,
+		BatchSize:    internal.KafkaProducerBatchSize,
+		BatchTimeout: internal.KafkaProducerBatchTimeout,
 		Compression:  kafka.Snappy,
 		RequiredAcks: kafka.RequireOne,
-		MaxAttempts:  3,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		MaxAttempts:  internal.KafkaProducerMaxAttempts,
+		ReadTimeout:  internal.KafkaProducerReadTimeout,
+		WriteTimeout: internal.KafkaProducerWriteTimeout,
 	}
-	return &Producer{writer: w}, nil
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	return &Producer{
+		writer: w,
+		ctx:    ctx,
+		cancel: cancel,
+	}, nil
 }
 
 func (p *Producer) Send(key string, value []byte) error {
-	return p.writer.WriteMessages(context.Background(), kafka.Message{
+	return p.writer.WriteMessages(p.ctx, kafka.Message{
 		Key:   []byte(key),
 		Value: value,
 	})
@@ -40,4 +49,20 @@ func (p *Producer) SendWithContext(ctx context.Context, key string, value []byte
 		Key:   []byte(key),
 		Value: value,
 	})
+}
+
+func (p *Producer) Close(ctx context.Context) error {
+	p.cancel() // Cancel parent context
+
+	doneCh := make(chan error, 1)
+	go func() {
+		doneCh <- p.writer.Close()
+	}()
+
+	select {
+	case err := <-doneCh:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

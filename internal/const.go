@@ -18,12 +18,55 @@ const (
 	HttpWriteTimeout = 10 * time.Second
 	HttpIdleTimeout  = 60 * time.Second
 
+	// Graceful shutdown timeout
+	ShutdownTimeout = 30 * time.Second
+
 	// TTL configurations
 	StatusTTL = 5 * time.Minute
 	ResultTTL = 10 * time.Minute
 
 	// upstream
-	UpstreamURL             = "https://polygon-amoy.drpc.org"
-	MaxUpstreamRequestSize  = 128 * 1024 // 128KB for the request size
-	MaxUpstreamResponseSize = 256 * 1024 // 256KB for the response size
+	UpstreamURL                   = "https://polygon-amoy.drpc.org"
+	MaxUpstreamRequestSize        = 128 * 1024 // 128KB for the request size
+	MaxUpstreamResponseSize       = 256 * 1024 // 256KB for the response size
+	UpstreamTLSHandshakeTimeout   = 10 * time.Second
+	UpstreamResponseHeaderTimeout = 10 * time.Second
+
+	// topic
+	KafkaTopic = "rpc_requests"
+
+	// Redis connection pool settings
+	RedisPoolSize     = 100
+	RedisMinIdleConns = 10
+	RedisMaxRetries   = 3
+
+	// HTTP client settings (for upstream RPC)
+	UpstreamMaxIdleConns        = 1000
+	UpstreamMaxIdleConnsPerHost = 1000
+	UpstreamMaxConnsPerHost     = 1000
+	UpstreamIdleConnTimeout     = 90 * time.Second
+
+	// Proxy handler settings
+	DefaultMaxConcurrent   = 1000
+	DefaultKafkaWorkers    = 32
+	KafkaChannelMultiplier = 2 // kafkaCh buffer = maxConcurrent * multiplier
+
+	// Kafka producer settings
+	KafkaProducerBatchSize    = 100
+	KafkaProducerBatchTimeout = 10 * time.Millisecond
+	KafkaProducerMaxAttempts  = 3
+	KafkaProducerReadTimeout  = 10 * time.Second
+	KafkaProducerWriteTimeout = 10 * time.Second
+
+	// Kafka consumer settings
+	KafkaConsumerMinBytes          = 10e3 // 10KB
+	KafkaConsumerMaxBytes          = 10e6 // 10MB
+	KafkaConsumerMaxWait           = 50 * time.Millisecond
+	KafkaConsumerReadLagInterval   = -1
+	KafkaConsumerHeartbeatInterval = 3 * time.Second
+	KafkaConsumerSessionTimeout    = 30 * time.Second
+	KafkaConsumerRebalanceTimeout  = 30 * time.Second
+	KafkaConsumerCommitInterval    = -1 // manual commit
+	KafkaConsumerCommitTimeout     = 5 * time.Second
+	KafkaConsumerJobChMultiplier   = 2 // jobCh buffer = workers * multiplier
 )
