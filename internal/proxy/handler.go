@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -11,13 +12,6 @@ import (
 	"drpc_proxy.com/internal/redis"
 	"github.com/bytedance/sonic"
 	"github.com/google/uuid"
-)
-
-const (
-	defaultBufSize = 64 * 1024 // 64KB fixed buffer
-	kafkaTimeout   = 5 * time.Second
-	statusTTL      = 5 * time.Minute
-	redisTimeout   = 2 * time.Second
 )
 
 type ErrorResponse struct {
@@ -75,37 +69,37 @@ func (h *Handler) startKafkaWorkers(n int) {
 }
 
 func (h *Handler) kafkaWorker() {
-	buf := make([]byte, defaultBufSize)
+	buf := make([]byte, internal.DefaultBufSize)
 	bgCtx := context.Background()
 
 	for msg := range h.kafkaCh {
 		b, err := sonic.Marshal(msg)
 		if err != nil {
-			redisCtx, cancel := context.WithTimeout(bgCtx, redisTimeout)
-			_ = h.store.SetStatus(redisCtx, msg.RequestID, "failed: marshal error", statusTTL)
+			redisCtx, cancel := context.WithTimeout(bgCtx, internal.RedisTimeout)
+			_ = h.store.SetStatus(redisCtx, msg.RequestID, "failed: marshal error", internal.StatusTTL)
 			cancel()
 			continue
 		}
 
 		if len(b) > len(buf) {
-			redisCtx, cancel := context.WithTimeout(bgCtx, redisTimeout)
-			_ = h.store.SetStatus(redisCtx, msg.RequestID, "failed: payload too large > 64KB", statusTTL)
+			redisCtx, cancel := context.WithTimeout(bgCtx, internal.RedisTimeout)
+			_ = h.store.SetStatus(redisCtx, msg.RequestID, "failed: payload too large > 64KB", internal.StatusTTL)
 			cancel()
 			continue
 		}
 
 		n := copy(buf, b)
 
-		deadline := time.Now().Add(kafkaTimeout)
+		deadline := time.Now().Add(internal.KafkaTimeout)
 		kafkaCtx, kcancel := context.WithDeadline(bgCtx, deadline)
 		err = h.producer.SendWithContext(kafkaCtx, msg.RequestID, buf[:n])
 		kcancel()
 
-		redisCtx, rcancel := context.WithTimeout(bgCtx, redisTimeout)
+		redisCtx, rcancel := context.WithTimeout(bgCtx, internal.RedisTimeout)
 		if err != nil {
-			_ = h.store.SetStatus(redisCtx, msg.RequestID, "failed: "+err.Error(), statusTTL)
+			_ = h.store.SetStatus(redisCtx, msg.RequestID, "failed: "+err.Error(), internal.StatusTTL)
 		} else {
-			_ = h.store.SetStatus(redisCtx, msg.RequestID, "queued", statusTTL)
+			_ = h.store.SetStatus(redisCtx, msg.RequestID, "queued", internal.StatusTTL)
 		}
 		rcancel()
 	}
@@ -121,26 +115,28 @@ func (h *Handler) HandleRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req internal.RPCRequest
-	if err := sonic.ConfigDefault.NewDecoder(r.Body).Decode(&req); err != nil {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil || len(raw) == 0 {
 		w.WriteHeader(http.StatusBadRequest)
-		_ = sonic.ConfigDefault.NewEncoder(w).Encode(ErrorResponse{Error: "invalid JSON-RPC request"})
+		_ = sonic.ConfigDefault.NewEncoder(w).Encode(ErrorResponse{Error: "invalid request body"})
 		return
 	}
 
-	if err := req.Validate(); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = sonic.ConfigDefault.NewEncoder(w).Encode(ErrorResponse{Error: err.Error()})
+	// check if the request is beyond the maximum request size (malicious)
+	if len(raw) > internal.MaxUpstreamRequestSize {
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+		_ = sonic.ConfigDefault.NewEncoder(w).Encode(ErrorResponse{Error: "request too large"})
 		return
 	}
 
+	// message unique id for each request
 	reqID := uuid.New().String()
 
 	// Set initial pending status in Redis
-	redisCtx, redisCancel := context.WithTimeout(r.Context(), redisTimeout)
+	redisCtx, redisCancel := context.WithTimeout(r.Context(), internal.RedisTimeout)
 	defer redisCancel()
 
-	if err := h.store.SetStatus(redisCtx, reqID, "pending", statusTTL); err != nil {
+	if err := h.store.SetStatus(redisCtx, reqID, "pending", internal.StatusTTL); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = sonic.ConfigDefault.NewEncoder(w).Encode(ErrorResponse{Error: "failed to initialize request"})
 		return
@@ -148,7 +144,7 @@ func (h *Handler) HandleRPC(w http.ResponseWriter, r *http.Request) {
 
 	msg := &internal.KafkaMessage{
 		RequestID:  reqID,
-		RPCRequest: req,
+		Raw:        raw,
 		ReceivedAt: time.Now().Unix(),
 	}
 
@@ -177,7 +173,7 @@ func (h *Handler) HandleResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	redisCtx, redisCancel := context.WithTimeout(r.Context(), redisTimeout)
+	redisCtx, redisCancel := context.WithTimeout(r.Context(), internal.RedisTimeout)
 	defer redisCancel()
 
 	// Check status first using strong-typed struct
