@@ -14,10 +14,6 @@ variable "security_group_id" {
   type = string
 }
 
-variable "availability_zones" {
-  type = list(string)
-}
-
 variable "number_of_brokers" {
   type    = number
   default = 2

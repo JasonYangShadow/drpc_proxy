@@ -12,7 +12,7 @@ RUN curl -fsSL https://get.docker.com | sh
 RUN sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/local/bin
 
 # Install Terraform
-ARG TERRAFORM_VERSION=1.10.5
+ARG TERRAFORM_VERSION=1.14.8
 RUN curl -fsSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip" -o /tmp/terraform.zip \
     && unzip /tmp/terraform.zip -d /usr/local/bin \
     && rm /tmp/terraform.zip \
