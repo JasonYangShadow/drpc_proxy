@@ -1,4 +1,5 @@
 resource "aws_ecr_repository" "proxy" {
+  count                = var.is_localstack ? 0 : 1
   name                 = "${var.name}-proxy"
   image_tag_mutability = "MUTABLE"
 
@@ -10,6 +11,7 @@ resource "aws_ecr_repository" "proxy" {
 }
 
 resource "aws_ecr_repository" "worker" {
+  count                = var.is_localstack ? 0 : 1
   name                 = "${var.name}-worker"
   image_tag_mutability = "MUTABLE"
 
@@ -37,12 +39,12 @@ locals {
 
 resource "aws_ecr_lifecycle_policy" "proxy" {
   count      = var.is_localstack ? 0 : 1
-  repository = aws_ecr_repository.proxy.name
+  repository = aws_ecr_repository.proxy[0].name
   policy     = local.lifecycle_policy
 }
 
 resource "aws_ecr_lifecycle_policy" "worker" {
   count      = var.is_localstack ? 0 : 1
-  repository = aws_ecr_repository.worker.name
+  repository = aws_ecr_repository.worker[0].name
   policy     = local.lifecycle_policy
 }

@@ -134,8 +134,8 @@ func (c *Consumer) Consume(handler func([]byte) ([]byte, error)) {
 			cancel()
 
 			if err != nil {
-				// Only log non-timeout errors
-				if err != context.DeadlineExceeded {
+				// Only log non-timeout errors; kafka-go wraps context errors so use errors.Is
+				if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 					log.Println("Kafka read error:", err)
 				}
 				continue

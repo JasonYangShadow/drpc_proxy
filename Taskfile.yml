@@ -10,264 +10,202 @@ env:
   CGO_ENABLED: "0"
 
 tasks:
-  # ------------------------------------------------------------
-  # Build
-  # ------------------------------------------------------------
-  build:proxy:
-    desc: Build the proxy binary
+  # ============================================================
+  # PUBLIC — shown in `task --list`
+  # ============================================================
+
+  default:
+    desc: "Build both binaries (default)"
+    deps: [_build]
+
+  build:
+    desc: "Build proxy and worker binaries → bin/"
+    deps: [_build]
+
+  test:
+    desc: "Run all unit tests with race detector"
+    deps: [_test:unit]
+
+  lint:
+    desc: "Run go vet across all packages"
+    deps: [_vet]
+
+  clean:
+    desc: "Remove build artifacts (bin/)"
+    cmds:
+      - rm -rf bin/
+
+  # ── Local stack ───────────────────────────────────────────────────────────
+
+  dev:up:
+    desc: "Start full local stack: Kafka, Redis, LocalStack, proxy, worker"
+    cmds:
+      - task: _docker:build
+      - docker compose up -d
+      - task: _network:join
+
+  dev:up:mock:
+    desc: "Start local stack with mock worker (no real upstream — load testing)"
+    cmds:
+      - task: _docker:build
+      - docker compose --profile mock up -d proxy worker-mock kafka redis
+      - task: _network:join
+
+  dev:up:infra:
+    desc: "Start infrastructure only: Kafka, Redis, LocalStack (no app containers)"
+    cmds:
+      - docker compose up -d kafka redis localstack
+      - task: _network:join
+
+  dev:down:
+    desc: "Stop and remove all local stack containers"
+    cmds:
+      - docker compose down
+
+  dev:logs:
+    desc: "Follow logs for all containers (Ctrl-C to stop)"
+    cmds:
+      - docker compose logs -f
+
+  dev:status:
+    desc: "Show running containers and LocalStack resource status"
+    cmds:
+      - task: _status
+
+  # ── Terraform / AWS ───────────────────────────────────────────────────────
+
+  infra:init:
+    desc: "terraform init — download providers (run once)"
+    deps: [_tf:init]
+
+  infra:local:
+    desc: "Apply Terraform against LocalStack (auto-approve)"
+    deps: [_tf:local:apply]
+
+  infra:local:destroy:
+    desc: "Destroy all LocalStack Terraform resources (auto-approve)"
+    deps: [_tf:local:destroy]
+
+  infra:plan:
+    desc: "terraform plan against real AWS"
+    deps: [_tf:plan]
+
+  infra:apply:
+    desc: "terraform apply against real AWS (prompts for confirmation)"
+    deps: [_tf:apply]
+
+  infra:destroy:
+    desc: "terraform destroy real AWS resources (prompts for confirmation)"
+    deps: [_tf:destroy]
+
+  infra:push:
+    desc: "Build images and push to ECR (real AWS). Optionally: task infra:push IMAGE_TAG=v1.2.3"
+    deps: [_tf:push]
+
+  # ============================================================
+  # INTERNAL — hidden from `task --list`
+  # ============================================================
+
+  _build:
+    internal: true
     cmds:
       - mkdir -p bin
       - go build {{.GO_FLAGS}} -o {{.PROXY_BIN}} ./cmd/proxy
-
-  build:worker:
-    desc: Build the worker binary
-    cmds:
-      - mkdir -p bin
       - go build {{.GO_FLAGS}} -o {{.WORKER_BIN}} ./cmd/worker
 
-  build:
-    desc: Build both binaries
-    deps: [build:proxy, build:worker]
-
-  # ------------------------------------------------------------
-  # Tests
-  # ------------------------------------------------------------
-  test:unit:
-    desc: Run all unit tests (no external dependencies required)
+  _test:unit:
+    internal: true
     env:
       CGO_ENABLED: "1"
     cmds:
       - go test {{.GO_FLAGS}} -v -race -count=1 -timeout 60s ./internal/...
 
-  test:e2e:
-    desc: "Run end-to-end tests (requires: Kafka, Redis, proxy, and worker running)"
-    summary: |
-      Set environment variables before running:
-        KAFKA_ADDR=localhost:9092
-        REDIS_ADDR=localhost:6379
-        PROXY_ADDR=http://localhost:8080
+  _test:e2e:
+    internal: true
     cmds:
       - go test {{.GO_FLAGS}} -v -tags e2e -timeout 120s ./tests/e2e/
 
-  test:
-    desc: Run unit tests (use 'task test:e2e' for end-to-end)
-    deps: [test:unit]
-
-  # ------------------------------------------------------------
-  # Code quality
-  # ------------------------------------------------------------
-  vet:
-    desc: Run go vet
+  _vet:
+    internal: true
     cmds:
       - go vet {{.GO_FLAGS}} ./...
 
-  lint:
-    desc: Run go vet across all packages
-    deps: [vet]
-
-  # ------------------------------------------------------------
-  # Run (development)
-  # ------------------------------------------------------------
-  run:proxy:
-    desc: "Run the proxy server (set KAFKA_ADDR, REDIS_ADDR as needed)"
-    cmds:
-      - go run {{.GO_FLAGS}} ./cmd/proxy
-
-  run:worker:
-    desc: "Run the worker (set KAFKA_ADDR, REDIS_ADDR as needed)"
-    cmds:
-      - go run {{.GO_FLAGS}} ./cmd/worker
-
-  # ------------------------------------------------------------
-  # Clean
-  # ------------------------------------------------------------
-  clean:
-    desc: Remove build artifacts
-    cmds:
-      - rm -rf bin/
-
-  # ------------------------------------------------------------
-  # Docker
-  # ------------------------------------------------------------
-  docker:build:
-    desc: Build proxy and worker Docker images
+  _docker:build:
+    internal: true
     cmds:
       - docker build -f Dockerfile.proxy -t drpc-proxy:local .
       - docker build -f Dockerfile.worker -t drpc-worker:local .
 
-  docker:up:
-    desc: Start full local stack (Kafka, Redis, LocalStack, proxy, worker)
-    cmds:
-      - docker compose up -d
-      - task: _network:join
-
-
-  docker:up:infra:
-    desc: Start infrastructure only (Kafka, Redis, LocalStack) — no app containers
-    cmds:
-      - docker compose up -d kafka redis localstack
-      - task: _network:join
-
-
-  docker:up:mock:
-    desc: Start with mock worker (no real upstream calls — for load testing)
-    cmds:
-      - docker compose --profile mock up -d proxy worker-mock kafka redis
-      - task: _network:join
-
   _network:join:
-    desc: Connect this dev container to the drpc docker-compose network (internal)
     internal: true
     cmds:
       - |
         NETWORK=drpc_proxy_drpc
-        SELF=$(cat /proc/self/cgroup | grep 'docker' | head -1 | sed 's/.*docker[-\/]//' | cut -c1-12)
-        if [ -z "$SELF" ]; then
-          echo "Cannot determine container ID — skipping network join"
-          exit 0
-        fi
+        SELF=$(cat /proc/self/mountinfo 2>/dev/null | grep -o '/containers/[a-f0-9]\{64\}' | head -1 | xargs basename 2>/dev/null | cut -c1-12)
+        [ -z "$SELF" ] && SELF=$(cat /proc/1/cpuset 2>/dev/null | grep -o '[a-f0-9]\{64\}' | head -1 | cut -c1-12)
+        [ -z "$SELF" ] && SELF=$(hostname)
+        [ -z "$SELF" ] && exit 0
         docker network connect "$NETWORK" "$SELF" 2>/dev/null \
           && echo "Joined Docker network: $NETWORK" \
-          || echo "Already on network: $NETWORK (or not in a container)"
+          || echo "Already on network: $NETWORK"
 
-  docker:down:
-    desc: Stop and remove all containers
-    cmds:
-      - docker compose down
-
-  docker:logs:
-    desc: Follow logs for all containers
-    cmds:
-      - docker compose logs -f
-
-  docker:logs:proxy:
-    desc: Follow proxy logs
-    cmds:
-      - docker compose logs -f proxy
-
-  docker:logs:worker:
-    desc: Follow worker logs
-    cmds:
-      - docker compose logs -f worker
-
-  # ------------------------------------------------------------
-  # LocalStack / ECS simulation
-  # ------------------------------------------------------------
-  localstack:up:
-    desc: Start LocalStack container
-    cmds:
-      - docker compose up -d localstack
-      - |
-        echo "Waiting for LocalStack..."
-        until curl -sf http://localstack:4566/_localstack/health | grep -q '"running"'; do sleep 2; done
-        echo "LocalStack is ready at http://localstack:4566"
-
-  localstack:bootstrap:
-    desc: Register ECS cluster, task definitions, services, secrets, and log groups in LocalStack
-    cmds:
-      - ./deploy/localstack/bootstrap.sh
-
-  localstack:status:
-    desc: Print ECS resource status from LocalStack
+  _status:
+    internal: true
     env:
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test
       AWS_DEFAULT_REGION: us-east-1
     cmds:
       - |
-        ENDPOINT=http://localstack:4566
-        echo "=== Task Definitions ==="
-        aws --endpoint-url=$ENDPOINT ecs list-task-definitions --output table
+        echo "=== Containers ==="
+        docker compose ps
         echo ""
-        echo "=== Services ==="
-        aws --endpoint-url=$ENDPOINT ecs list-services --cluster drpc-cluster --output table
+        echo "=== LocalStack Health ==="
+        curl -s http://localstack:4566/_localstack/health | python3 -m json.tool | grep -E '"(iam|logs|secretsmanager|sts|s3)": ' || echo "(LocalStack not running)"
         echo ""
         echo "=== Secrets ==="
-        aws --endpoint-url=$ENDPOINT secretsmanager list-secrets --output table
+        aws --endpoint-url=http://localstack:4566 secretsmanager list-secrets --query 'SecretList[].Name' --output table 2>/dev/null || true
+        echo ""
+        echo "=== CloudWatch Log Groups ==="
+        aws --endpoint-url=http://localstack:4566 logs describe-log-groups --query 'logGroups[].logGroupName' --output table 2>/dev/null || true
 
-  localstack:clean:
-    desc: Delete all LocalStack ECS resources (cluster, services, task definitions)
-    env:
-      AWS_ACCESS_KEY_ID: test
-      AWS_SECRET_ACCESS_KEY: test
-      AWS_DEFAULT_REGION: us-east-1
-    cmds:
-      - |
-        ENDPOINT=http://localstack:4566
-        for SVC in drpc-proxy-service drpc-worker-service; do
-          aws --endpoint-url=$ENDPOINT ecs update-service --cluster drpc-cluster --service $SVC --desired-count 0 2>/dev/null || true
-          aws --endpoint-url=$ENDPOINT ecs delete-service --cluster drpc-cluster --service $SVC 2>/dev/null || true
-        done
-        aws --endpoint-url=$ENDPOINT ecs delete-cluster --cluster drpc-cluster 2>/dev/null || true
-        echo "LocalStack ECS resources removed"
-
-  # ------------------------------------------------------------
-  # Terraform (real AWS)
-  # ------------------------------------------------------------
-  tf:init:
-    desc: "Initialise Terraform (download providers)"
+  _tf:init:
+    internal: true
     dir: terraform
     cmds:
       - terraform init
 
-  tf:validate:
-    desc: Validate Terraform configuration
-    dir: terraform
-    cmds:
-      - terraform validate
-
-  tf:plan:
-    desc: "Preview a Terraform deployment to real AWS"
+  _tf:plan:
+    internal: true
     dir: terraform
     cmds:
       - terraform plan
 
-  tf:apply:
-    desc: "Apply Terraform changes to real AWS (prompts for confirmation)"
+  _tf:apply:
+    internal: true
     dir: terraform
     cmds:
       - terraform apply
 
-  tf:destroy:
-    desc: "Destroy all real-AWS Terraform-managed resources (prompts for confirmation)"
+  _tf:destroy:
+    internal: true
     dir: terraform
     cmds:
       - terraform destroy
 
-  # ── Terraform against LocalStack ──────────────────────────────────────────
-
-  tf:local:init:
-    desc: "Initialise Terraform targeting LocalStack"
+  _tf:local:apply:
+    internal: true
     dir: terraform
     env:
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test
       AWS_DEFAULT_REGION: us-east-1
     cmds:
-      - terraform init
-
-  tf:local:plan:
-    desc: "Preview Terraform changes against LocalStack"
-    dir: terraform
-    env:
-      AWS_ACCESS_KEY_ID: test
-      AWS_SECRET_ACCESS_KEY: test
-      AWS_DEFAULT_REGION: us-east-1
-    cmds:
-      - terraform plan -var-file=localstack.tfvars
-
-  tf:local:apply:
-    desc: "Apply Terraform changes to LocalStack (auto-approves)"
-    dir: terraform
-    env:
-      AWS_ACCESS_KEY_ID: test
-      AWS_SECRET_ACCESS_KEY: test
-      AWS_DEFAULT_REGION: us-east-1
-    cmds:
+      - terraform init -input=false
       - terraform apply -var-file=localstack.tfvars -auto-approve
 
-  tf:local:destroy:
-    desc: "Destroy LocalStack Terraform resources (auto-approves)"
+  _tf:local:destroy:
+    internal: true
     dir: terraform
     env:
       AWS_ACCESS_KEY_ID: test
@@ -276,10 +214,8 @@ tasks:
     cmds:
       - terraform destroy -var-file=localstack.tfvars -auto-approve
 
-  # ── Push images to ECR ────────────────────────────────────────────────────
-
-  tf:push:
-    desc: "Build Docker images and push to ECR repositories created by Terraform"
+  _tf:push:
+    internal: true
     dir: terraform
     vars:
       PROXY_URL:
@@ -294,26 +230,3 @@ tasks:
       - docker push {{.PROXY_URL}}:{{.IMAGE_TAG | default "latest"}}
       - docker build -f ../Dockerfile.worker -t {{.WORKER_URL}}:{{.IMAGE_TAG | default "latest"}} ..
       - docker push {{.WORKER_URL}}:{{.IMAGE_TAG | default "latest"}}
-
-  tf:push:local:
-    desc: "Build and push images to LocalStack ECR (uses docker-compose image names)"
-    cmds:
-      - task: docker:build
-      - |
-        ENDPOINT=http://localstack:4566
-        AWS_REGION=us-east-1
-        ACCOUNT=000000000000
-        REGISTRY="${ACCOUNT}.dkr.ecr.${AWS_REGION}.localhost.localstack.cloud:4566"
-        aws --endpoint-url=$ENDPOINT ecr get-login-password --region $AWS_REGION \
-          | docker login --username AWS --password-stdin $REGISTRY
-        docker tag drpc-proxy:local  $REGISTRY/drpc-local-proxy:latest
-        docker push $REGISTRY/drpc-local-proxy:latest
-        docker tag drpc-worker:local $REGISTRY/drpc-local-worker:latest
-        docker push $REGISTRY/drpc-local-worker:latest
-
-  # ------------------------------------------------------------
-  # Default
-  # ------------------------------------------------------------
-  default:
-    desc: Build both binaries (default task)
-    deps: [build]

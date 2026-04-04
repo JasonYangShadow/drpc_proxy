@@ -65,7 +65,7 @@ const (
 	KafkaConsumerHeartbeatInterval = 3 * time.Second
 	KafkaConsumerSessionTimeout    = 30 * time.Second
 	KafkaConsumerRebalanceTimeout  = 30 * time.Second
-	KafkaConsumerCommitInterval    = -1 // manual commit
+	KafkaConsumerCommitInterval    = 0 // synchronous manual commit (kafka-go: 0 = commit on CommitMessages call)
 	KafkaConsumerCommitTimeout     = 5 * time.Second
 	KafkaConsumerJobChMultiplier   = 2 // jobCh buffer = workers * multiplier
 

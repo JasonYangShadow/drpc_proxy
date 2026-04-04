@@ -1,40 +1,39 @@
 # ── VPC ───────────────────────────────────────────────────────────────────────
 
 resource "aws_vpc" "main" {
+  count                = var.is_localstack ? 0 : 1
   cidr_block           = var.vpc_cidr
   enable_dns_hostnames = true
   enable_dns_support   = true
-
-  tags = { Name = "${var.name}-vpc" }
+  tags                 = { Name = "${var.name}-vpc" }
 }
 
 resource "aws_internet_gateway" "main" {
-  vpc_id = aws_vpc.main.id
+  count  = var.is_localstack ? 0 : 1
+  vpc_id = aws_vpc.main[0].id
   tags   = { Name = "${var.name}-igw" }
 }
 
 # ── Subnets ───────────────────────────────────────────────────────────────────
 
 resource "aws_subnet" "public" {
-  count             = length(var.availability_zones)
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = cidrsubnet(var.vpc_cidr, 8, count.index)
-  availability_zone = var.availability_zones[count.index]
+  count                   = var.is_localstack ? 0 : length(var.availability_zones)
+  vpc_id                  = aws_vpc.main[0].id
+  cidr_block              = cidrsubnet(var.vpc_cidr, 8, count.index)
+  availability_zone       = var.availability_zones[count.index]
   map_public_ip_on_launch = true
-
-  tags = { Name = "${var.name}-public-${count.index + 1}" }
+  tags                    = { Name = "${var.name}-public-${count.index + 1}" }
 }
 
 resource "aws_subnet" "private" {
-  count             = length(var.availability_zones)
-  vpc_id            = aws_vpc.main.id
+  count             = var.is_localstack ? 0 : length(var.availability_zones)
+  vpc_id            = aws_vpc.main[0].id
   cidr_block        = cidrsubnet(var.vpc_cidr, 8, count.index + 10)
   availability_zone = var.availability_zones[count.index]
-
-  tags = { Name = "${var.name}-private-${count.index + 1}" }
+  tags              = { Name = "${var.name}-private-${count.index + 1}" }
 }
 
-# ── NAT Gateway (skip on LocalStack — not supported) ─────────────────────────
+# ── NAT Gateway ───────────────────────────────────────────────────────────────
 
 resource "aws_eip" "nat" {
   count  = var.is_localstack ? 0 : length(var.availability_zones)
@@ -52,25 +51,26 @@ resource "aws_nat_gateway" "main" {
 # ── Route Tables ──────────────────────────────────────────────────────────────
 
 resource "aws_route_table" "public" {
-  vpc_id = aws_vpc.main.id
+  count  = var.is_localstack ? 0 : 1
+  vpc_id = aws_vpc.main[0].id
 
   route {
     cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.main.id
+    gateway_id = aws_internet_gateway.main[0].id
   }
 
   tags = { Name = "${var.name}-rt-public" }
 }
 
 resource "aws_route_table_association" "public" {
-  count          = length(var.availability_zones)
+  count          = var.is_localstack ? 0 : length(var.availability_zones)
   subnet_id      = aws_subnet.public[count.index].id
-  route_table_id = aws_route_table.public.id
+  route_table_id = aws_route_table.public[0].id
 }
 
 resource "aws_route_table" "private" {
   count  = var.is_localstack ? 0 : length(var.availability_zones)
-  vpc_id = aws_vpc.main.id
+  vpc_id = aws_vpc.main[0].id
 
   route {
     cidr_block     = "0.0.0.0/0"
@@ -89,9 +89,10 @@ resource "aws_route_table_association" "private" {
 # ── Security Groups ───────────────────────────────────────────────────────────
 
 resource "aws_security_group" "alb" {
+  count       = var.is_localstack ? 0 : 1
   name        = "${var.name}-alb-sg"
   description = "Allow inbound HTTP to ALB"
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = aws_vpc.main[0].id
 
   ingress {
     from_port   = 80
@@ -118,16 +119,17 @@ resource "aws_security_group" "alb" {
 }
 
 resource "aws_security_group" "ecs" {
+  count       = var.is_localstack ? 0 : 1
   name        = "${var.name}-ecs-sg"
   description = "ECS task security group"
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = aws_vpc.main[0].id
 
   ingress {
     description     = "Allow traffic from ALB"
     from_port       = 8545
     to_port         = 8545
     protocol        = "tcp"
-    security_groups = [aws_security_group.alb.id]
+    security_groups = [aws_security_group.alb[0].id]
   }
 
   egress {
@@ -141,16 +143,17 @@ resource "aws_security_group" "ecs" {
 }
 
 resource "aws_security_group" "msk" {
+  count       = var.is_localstack ? 0 : 1
   name        = "${var.name}-msk-sg"
   description = "MSK Kafka security group"
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = aws_vpc.main[0].id
 
   ingress {
     description     = "Kafka plaintext from ECS"
     from_port       = 9092
     to_port         = 9092
     protocol        = "tcp"
-    security_groups = [aws_security_group.ecs.id]
+    security_groups = [aws_security_group.ecs[0].id]
   }
 
   ingress {
@@ -158,7 +161,7 @@ resource "aws_security_group" "msk" {
     from_port       = 9094
     to_port         = 9094
     protocol        = "tcp"
-    security_groups = [aws_security_group.ecs.id]
+    security_groups = [aws_security_group.ecs[0].id]
   }
 
   egress {
@@ -172,16 +175,17 @@ resource "aws_security_group" "msk" {
 }
 
 resource "aws_security_group" "redis" {
+  count       = var.is_localstack ? 0 : 1
   name        = "${var.name}-redis-sg"
   description = "ElastiCache Redis security group"
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = aws_vpc.main[0].id
 
   ingress {
     description     = "Redis from ECS"
     from_port       = 6379
     to_port         = 6379
     protocol        = "tcp"
-    security_groups = [aws_security_group.ecs.id]
+    security_groups = [aws_security_group.ecs[0].id]
   }
 
   egress {
@@ -197,20 +201,21 @@ resource "aws_security_group" "redis" {
 # ── Application Load Balancer ─────────────────────────────────────────────────
 
 resource "aws_lb" "proxy" {
+  count              = var.is_localstack ? 0 : 1
   name               = "${var.name}-alb"
   internal           = false
   load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb.id]
+  security_groups    = [aws_security_group.alb[0].id]
   subnets            = aws_subnet.public[*].id
-
-  tags = { Name = "${var.name}-alb" }
+  tags               = { Name = "${var.name}-alb" }
 }
 
 resource "aws_lb_target_group" "proxy" {
+  count       = var.is_localstack ? 0 : 1
   name        = "${var.name}-proxy-tg"
   port        = 8545
   protocol    = "HTTP"
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = aws_vpc.main[0].id
   target_type = "ip"
 
   health_check {
@@ -226,12 +231,13 @@ resource "aws_lb_target_group" "proxy" {
 }
 
 resource "aws_lb_listener" "proxy" {
-  load_balancer_arn = aws_lb.proxy.arn
+  count             = var.is_localstack ? 0 : 1
+  load_balancer_arn = aws_lb.proxy[0].arn
   port              = 80
   protocol          = "HTTP"
 
   default_action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.proxy.arn
+    target_group_arn = aws_lb_target_group.proxy[0].arn
   }
 }
