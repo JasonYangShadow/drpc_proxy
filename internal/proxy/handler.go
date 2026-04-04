@@ -61,7 +61,7 @@ func (h *Handler) startKafkaWorkers(n int) {
 }
 
 func (h *Handler) kafkaWorker() {
-	buf := make([]byte, internal.DefaultBufSize)
+	buf := make([]byte, internal.KafkaMessageMaxSize)
 
 	for msg := range h.kafkaCh {
 		b, err := sonic.Marshal(msg)
@@ -141,8 +141,6 @@ func (h *Handler) HandleRPC(w http.ResponseWriter, r *http.Request) {
 
 	// Set initial pending status in Redis
 	redisCtx, redisCancel := context.WithTimeout(r.Context(), internal.RedisTimeout)
-	defer redisCancel()
-
 	if err := h.store.SaveResponse(redisCtx, &internal.Response{
 		Status:    "pending",
 		RequestID: reqID,
@@ -151,6 +149,7 @@ func (h *Handler) HandleRPC(w http.ResponseWriter, r *http.Request) {
 		_ = sonic.ConfigDefault.NewEncoder(w).Encode(ErrorResponse{Error: "failed to initialize request"})
 		return
 	}
+	redisCancel()
 
 	msg := &internal.KafkaMessage{
 		RequestID:  reqID,

@@ -3,8 +3,6 @@ package internal
 import "time"
 
 const (
-	// Handler buffer size
-	DefaultBufSize = 256 * 1024 // 256KB fixed buffer
 
 	// Timeout configurations
 	KafkaTimeout      = 5 * time.Second
@@ -49,7 +47,8 @@ const (
 	// Proxy handler settings
 	DefaultMaxConcurrent   = 1000
 	DefaultKafkaWorkers    = 32
-	KafkaChannelMultiplier = 2 // kafkaCh buffer = maxConcurrent * multiplier
+	KafkaChannelMultiplier = 2          // kafkaCh buffer = maxConcurrent * multiplier
+	KafkaMessageMaxSize    = 256 * 1024 // 256KB fixed buffer
 
 	// Kafka producer settings
 	KafkaProducerBatchSize    = 100
