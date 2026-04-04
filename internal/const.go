@@ -7,7 +7,7 @@ const (
 	// Timeout configurations
 	KafkaTimeout      = 5 * time.Second
 	RedisTimeout      = 2 * time.Second
-	UpstreamTimeout   = 30 * time.Second
+	UpstreamTimeout   = 3 * time.Second
 	RedisDialTimeout  = 5 * time.Second
 	RedisReadTimeout  = 3 * time.Second
 	RedisWriteTimeout = 3 * time.Second
@@ -17,7 +17,7 @@ const (
 	HttpIdleTimeout  = 60 * time.Second
 
 	// Graceful shutdown timeout
-	ShutdownTimeout = 30 * time.Second
+	ShutdownTimeout = 60 * time.Second
 
 	// TTL configurations
 	StatusTTL = 5 * time.Minute
@@ -27,8 +27,8 @@ const (
 	UpstreamURL                   = "https://polygon-amoy.drpc.org"
 	MaxUpstreamRequestSize        = 128 * 1024 // 128KB for the request size
 	MaxUpstreamResponseSize       = 256 * 1024 // 256KB for the response size
-	UpstreamTLSHandshakeTimeout   = 10 * time.Second
-	UpstreamResponseHeaderTimeout = 10 * time.Second
+	UpstreamTLSHandshakeTimeout   = 2 * time.Second
+	UpstreamResponseHeaderTimeout = 2 * time.Second
 
 	// topic
 	KafkaTopic = "rpc_requests"
@@ -68,4 +68,13 @@ const (
 	KafkaConsumerCommitInterval    = -1 // manual commit
 	KafkaConsumerCommitTimeout     = 5 * time.Second
 	KafkaConsumerJobChMultiplier   = 2 // jobCh buffer = workers * multiplier
+
+	// retry settings
+	UpstreamMaxRetries          = 3
+	UpstreamRetryInitialBackoff = 100 * time.Millisecond // exponential base
+	UpstreamRetryMaxBackoff     = 2 * time.Second        // backoff cap
+
+	// dead letter queue settings
+	KafkaDLQTopic        = "rpc_requests_dlq"
+	KafkaDLQWriteTimeout = 5 * time.Second
 )

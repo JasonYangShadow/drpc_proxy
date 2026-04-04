@@ -25,8 +25,7 @@ type Handler struct {
 
 	kafkaCh   chan *internal.KafkaMessage
 	onceStart sync.Once
-	ctx       context.Context
-	cancel    context.CancelFunc
+	wg        sync.WaitGroup
 }
 
 func NewHandler(p *kafka.Producer, s *redis.Store, maxConcurrent int, kafkaWorkers int) *Handler {
@@ -37,15 +36,11 @@ func NewHandler(p *kafka.Producer, s *redis.Store, maxConcurrent int, kafkaWorke
 		kafkaWorkers = internal.DefaultKafkaWorkers
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-
 	h := &Handler{
 		producer:  p,
 		store:     s,
 		semaphore: make(chan struct{}, maxConcurrent),
 		kafkaCh:   make(chan *internal.KafkaMessage, maxConcurrent*internal.KafkaChannelMultiplier),
-		ctx:       ctx,
-		cancel:    cancel,
 	}
 
 	h.startKafkaWorkers(kafkaWorkers)
@@ -55,7 +50,11 @@ func NewHandler(p *kafka.Producer, s *redis.Store, maxConcurrent int, kafkaWorke
 func (h *Handler) startKafkaWorkers(n int) {
 	h.onceStart.Do(func() {
 		for i := 0; i < n; i++ {
-			go h.kafkaWorker()
+			h.wg.Add(1)
+			go func() {
+				defer h.wg.Done()
+				h.kafkaWorker()
+			}()
 		}
 	})
 }
@@ -66,7 +65,7 @@ func (h *Handler) kafkaWorker() {
 	for msg := range h.kafkaCh {
 		b, err := sonic.Marshal(msg)
 		if err != nil {
-			redisCtx, cancel := context.WithTimeout(h.ctx, internal.RedisTimeout)
+			redisCtx, cancel := context.WithTimeout(context.Background(), internal.RedisTimeout)
 			_ = h.store.SaveResponse(redisCtx, &internal.Response{
 				Status:    "failed",
 				RequestID: msg.RequestID,
@@ -77,7 +76,7 @@ func (h *Handler) kafkaWorker() {
 		}
 
 		if len(b) > len(buf) {
-			redisCtx, cancel := context.WithTimeout(h.ctx, internal.RedisTimeout)
+			redisCtx, cancel := context.WithTimeout(context.Background(), internal.RedisTimeout)
 			_ = h.store.SaveResponse(redisCtx, &internal.Response{
 				Status:    "failed",
 				RequestID: msg.RequestID,
@@ -89,11 +88,11 @@ func (h *Handler) kafkaWorker() {
 
 		n := copy(buf, b)
 
-		kafkaCtx, kcancel := context.WithTimeout(h.ctx, internal.KafkaTimeout)
+		kafkaCtx, kcancel := context.WithTimeout(context.Background(), internal.KafkaTimeout)
 		err = h.producer.SendWithContext(kafkaCtx, msg.RequestID, buf[:n])
 		kcancel()
 
-		redisCtx, rcancel := context.WithTimeout(h.ctx, internal.RedisTimeout)
+		redisCtx, rcancel := context.WithTimeout(context.Background(), internal.RedisTimeout)
 		if err != nil {
 			_ = h.store.SaveResponse(redisCtx, &internal.Response{
 				Status:    "failed",
@@ -115,6 +114,7 @@ func (h *Handler) HandleRPC(w http.ResponseWriter, r *http.Request) {
 	case h.semaphore <- struct{}{}:
 		defer func() { <-h.semaphore }()
 	default:
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
 		_ = sonic.ConfigDefault.NewEncoder(w).Encode(ErrorResponse{Error: "server overloaded, please retry later"})
 		return
@@ -124,6 +124,7 @@ func (h *Handler) HandleRPC(w http.ResponseWriter, r *http.Request) {
 	limitedBody := io.LimitReader(r.Body, internal.MaxUpstreamRequestSize+1)
 	raw, err := io.ReadAll(limitedBody)
 	if err != nil || len(raw) == 0 {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		_ = sonic.ConfigDefault.NewEncoder(w).Encode(ErrorResponse{Error: "invalid request body"})
 		return
@@ -131,6 +132,7 @@ func (h *Handler) HandleRPC(w http.ResponseWriter, r *http.Request) {
 
 	// check if the request is beyond the maximum request size (malicious)
 	if len(raw) > internal.MaxUpstreamRequestSize {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusRequestEntityTooLarge)
 		_ = sonic.ConfigDefault.NewEncoder(w).Encode(ErrorResponse{Error: "request too large"})
 		return
@@ -141,15 +143,16 @@ func (h *Handler) HandleRPC(w http.ResponseWriter, r *http.Request) {
 
 	// Set initial pending status in Redis
 	redisCtx, redisCancel := context.WithTimeout(r.Context(), internal.RedisTimeout)
+	defer redisCancel()
 	if err := h.store.SaveResponse(redisCtx, &internal.Response{
 		Status:    "pending",
 		RequestID: reqID,
 	}, internal.StatusTTL); err != nil {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = sonic.ConfigDefault.NewEncoder(w).Encode(ErrorResponse{Error: "failed to initialize request"})
 		return
 	}
-	redisCancel()
 
 	msg := &internal.KafkaMessage{
 		RequestID:  reqID,
@@ -160,6 +163,15 @@ func (h *Handler) HandleRPC(w http.ResponseWriter, r *http.Request) {
 	select {
 	case h.kafkaCh <- msg:
 	default:
+		// Clean up the pending Redis key since the request is being rejected
+		cleanCtx, cleanCancel := context.WithTimeout(context.Background(), internal.RedisTimeout)
+		_ = h.store.SaveResponse(cleanCtx, &internal.Response{
+			Status:    "failed",
+			RequestID: reqID,
+			Error:     "kafka queue full",
+		}, internal.StatusTTL)
+		cleanCancel()
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_ = sonic.ConfigDefault.NewEncoder(w).Encode(ErrorResponse{Error: "kafka queue full, please retry later"})
 		return
@@ -207,6 +219,6 @@ func (h *Handler) HandleResult(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Close() {
-	h.cancel()       // Cancel parent context
-	close(h.kafkaCh) // Close kafka channel to stop workers
+	close(h.kafkaCh) // signals kafkaWorker goroutines to exit
+	h.wg.Wait()      // wait for all workers to finish in-flight writes
 }

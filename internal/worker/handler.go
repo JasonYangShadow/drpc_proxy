@@ -3,13 +3,25 @@ package worker
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"drpc_proxy.com/internal"
-	"drpc_proxy.com/internal/redis"
 	"github.com/bytedance/sonic"
 )
+
+// upstreamError carries a non-retryable upstream error along with its response body
+type upstreamError struct {
+	statusCode int
+	body       []byte
+}
+
+func (e *upstreamError) Error() string {
+	return fmt.Sprintf("upstream error (status %d): %s", e.statusCode, e.body)
+}
 
 var upstreamClient = &http.Client{
 	Transport: &http.Transport{
@@ -23,62 +35,93 @@ var upstreamClient = &http.Client{
 }
 
 type Processor struct {
-	store  *redis.Store
 	ctx    context.Context
 	cancel context.CancelFunc
 }
 
-func NewProcessor(store *redis.Store) *Processor {
+func NewProcessor() *Processor {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Processor{
-		store:  store,
 		ctx:    ctx,
 		cancel: cancel,
 	}
 }
 
-func (p *Processor) Process(msg []byte) error {
+func (p *Processor) Process(msg []byte) ([]byte, error) {
 	var m internal.KafkaMessage
 	if err := sonic.Unmarshal(msg, &m); err != nil {
-		return err
+		return nil, err
 	}
 
 	// Use pre-marshaled RPC payload
 	rpcPayload := m.Raw
 
-	// Upstream request
-	upstreamCtx, upstreamCancel := context.WithTimeout(p.ctx, internal.UpstreamTimeout)
-	defer upstreamCancel()
+	var respBody []byte
+	var err error
 
-	req, err := http.NewRequestWithContext(upstreamCtx, "POST", internal.UpstreamURL, bytes.NewReader(rpcPayload))
+	// retry upstream RPC
+	for attempt := 1; attempt <= internal.UpstreamMaxRetries; attempt++ {
+		respBody, err = p.callUpstream(rpcPayload)
+		if err == nil {
+			break
+		}
+
+		// Non-retryable upstream error — stop immediately
+		var upErr *upstreamError
+		if errors.As(err, &upErr) {
+			return upErr.body, err
+		}
+
+		// Skip backoff on last attempt
+		if attempt == internal.UpstreamMaxRetries {
+			break
+		}
+
+		// Exponential backoff: 100ms, 200ms, 400ms... capped at 2s
+		backoff := internal.UpstreamRetryInitialBackoff * (1 << (attempt - 1))
+		if backoff > internal.UpstreamRetryMaxBackoff {
+			backoff = internal.UpstreamRetryMaxBackoff
+		}
+
+		// Context-aware sleep: interrupted on shutdown
+		select {
+		case <-time.After(backoff):
+		case <-p.ctx.Done():
+			return nil, fmt.Errorf("context cancelled during retry backoff: %w", p.ctx.Err())
+		}
+	}
+
 	if err != nil {
-		return err
+		return nil, err
+	}
+
+	return respBody, nil
+}
+
+func (p *Processor) callUpstream(raw []byte) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), internal.UpstreamTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", internal.UpstreamURL, bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := upstreamClient.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
-	// Limit response size
-	limited := io.LimitReader(resp.Body, internal.MaxUpstreamResponseSize)
-
-	body, err := io.ReadAll(limited)
-	if err != nil {
-		return err
+	// non-retryable 4xx errors — carry response body back to caller
+	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, internal.MaxUpstreamResponseSize))
+		return nil, &upstreamError{statusCode: resp.StatusCode, body: body}
 	}
 
-	// Save to Redis with completed status
-	redisCtx, redisCancel := context.WithTimeout(p.ctx, internal.RedisTimeout)
-	defer redisCancel()
-
-	return p.store.SaveResponse(redisCtx, &internal.Response{
-		Status:    "completed",
-		RequestID: m.RequestID,
-		Result:    body,
-	}, internal.ResultTTL)
+	limited := io.LimitReader(resp.Body, internal.MaxUpstreamResponseSize)
+	return io.ReadAll(limited)
 }
 
 func (p *Processor) Close() {

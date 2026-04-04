@@ -11,7 +11,6 @@ import (
 
 	"drpc_proxy.com/internal"
 	"drpc_proxy.com/internal/kafka"
-	"drpc_proxy.com/internal/redis"
 	"drpc_proxy.com/internal/worker"
 )
 
@@ -48,13 +47,12 @@ func main() {
 }
 
 func runWorker(cmd *cobra.Command, args []string) {
-	consumer, err := kafka.NewConsumer(kafkaAddr, groupID, workers)
+	consumer, err := kafka.NewConsumer(kafkaAddr, groupID, redisAddr, workers)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	store := redis.NewStore(redisAddr)
-	processor := worker.NewProcessor(store)
+	processor := worker.NewProcessor()
 
 	// Setup graceful shutdown
 	sigCh := make(chan os.Signal, 1)
@@ -75,18 +73,13 @@ func runWorker(cmd *cobra.Command, args []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), internal.ShutdownTimeout)
 	defer cancel()
 
-	// Close processor (cancels context)
-	processor.Close()
-
-	// Close Kafka consumer
+	// Close Kafka consumer first — drains in-flight workers before cancelling processor
 	if err := consumer.Close(ctx); err != nil {
-		log.Printf("Kafka consumer close error: %v", err)
+		log.Printf("Consumer close error: %v", err)
 	}
 
-	// Close Redis store
-	if err := store.Close(ctx); err != nil {
-		log.Printf("Redis store close error: %v", err)
-	}
+	// Close processor after all workers have finished
+	processor.Close()
 
 	log.Println("Worker shutdown complete")
 }
