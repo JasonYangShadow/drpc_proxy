@@ -1,0 +1,75 @@
+{
+    "family": "drpc-proxy",
+    "networkMode": "awsvpc",
+    "requiresCompatibilities": [
+        "FARGATE"
+    ],
+    "cpu": "512",
+    "memory": "1024",
+    "executionRoleArn": "arn:aws:iam::000000000000:role/ecsTaskExecutionRole",
+    "taskRoleArn": "arn:aws:iam::000000000000:role/ecsTaskRole",
+    "containerDefinitions": [
+        {
+            "name": "drpc-proxy",
+            "image": "000000000000.dkr.ecr.us-east-1.localhost.localstack.cloud:4566/drpc-proxy:latest",
+            "essential": true,
+            "portMappings": [
+                {
+                    "containerPort": 8545,
+                    "hostPort": 8545,
+                    "protocol": "tcp"
+                }
+            ],
+            "command": [
+                "proxy",
+                "--port",
+                "8545",
+                "--kafka",
+                "kafka:9092",
+                "--redis",
+                "redis:6379",
+                "--max-concurrent",
+                "1000",
+                "--kafka-workers",
+                "10"
+            ],
+            "environment": [
+                {
+                    "name": "GOGC",
+                    "value": "100"
+                }
+            ],
+            "secrets": [
+                {
+                    "name": "KAFKA_ADDR",
+                    "valueFrom": "arn:aws:secretsmanager:us-east-1:000000000000:secret:drpc/kafka-addr"
+                },
+                {
+                    "name": "REDIS_ADDR",
+                    "valueFrom": "arn:aws:secretsmanager:us-east-1:000000000000:secret:drpc/redis-addr"
+                }
+            ],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/drpc-proxy",
+                    "awslogs-region": "us-east-1",
+                    "awslogs-stream-prefix": "ecs"
+                }
+            },
+            "healthCheck": {
+                "command": [
+                    "CMD-SHELL",
+                    "wget -qO- http://localhost:8545/health || exit 1"
+                ],
+                "interval": 30,
+                "timeout": 5,
+                "retries": 3,
+                "startPeriod": 10
+            },
+            "linuxParameters": {
+                "initProcessEnabled": true
+            }
+        }
+    ]
+}

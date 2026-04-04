@@ -1,0 +1,56 @@
+{
+    "family": "drpc-worker",
+    "networkMode": "awsvpc",
+    "requiresCompatibilities": [
+        "FARGATE"
+    ],
+    "cpu": "1024",
+    "memory": "2048",
+    "executionRoleArn": "arn:aws:iam::000000000000:role/ecsTaskExecutionRole",
+    "taskRoleArn": "arn:aws:iam::000000000000:role/ecsTaskRole",
+    "containerDefinitions": [
+        {
+            "name": "drpc-worker",
+            "image": "000000000000.dkr.ecr.us-east-1.localhost.localstack.cloud:4566/drpc-worker:latest",
+            "essential": true,
+            "command": [
+                "run",
+                "--kafka",
+                "kafka:9092",
+                "--redis",
+                "redis:6379",
+                "--group",
+                "rpc-workers",
+                "--workers",
+                "20"
+            ],
+            "environment": [
+                {
+                    "name": "GOGC",
+                    "value": "100"
+                }
+            ],
+            "secrets": [
+                {
+                    "name": "KAFKA_ADDR",
+                    "valueFrom": "arn:aws:secretsmanager:us-east-1:000000000000:secret:drpc/kafka-addr"
+                },
+                {
+                    "name": "REDIS_ADDR",
+                    "valueFrom": "arn:aws:secretsmanager:us-east-1:000000000000:secret:drpc/redis-addr"
+                }
+            ],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/drpc-worker",
+                    "awslogs-region": "us-east-1",
+                    "awslogs-stream-prefix": "ecs"
+                }
+            },
+            "linuxParameters": {
+                "initProcessEnabled": true
+            }
+        }
+    ]
+}

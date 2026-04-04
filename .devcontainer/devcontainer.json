@@ -19,7 +19,8 @@
             "extensions": [
                 "golang.go",
                 "ms-azuretools.vscode-docker",
-                "task.vscode-task"
+                "task.vscode-task",
+                "hashicorp.terraform"
             ]
         }
     },

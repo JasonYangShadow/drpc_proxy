@@ -87,6 +87,211 @@ tasks:
       - rm -rf bin/
 
   # ------------------------------------------------------------
+  # Docker
+  # ------------------------------------------------------------
+  docker:build:
+    desc: Build proxy and worker Docker images
+    cmds:
+      - docker build -f Dockerfile.proxy -t drpc-proxy:local .
+      - docker build -f Dockerfile.worker -t drpc-worker:local .
+
+  docker:up:
+    desc: Start full local stack (Kafka, Redis, LocalStack, proxy, worker)
+    cmds:
+      - docker compose up -d
+
+  docker:up:infra:
+    desc: Start infrastructure only (Kafka, Redis, LocalStack) — no app containers
+    cmds:
+      - docker compose up -d kafka redis localstack
+
+  docker:up:mock:
+    desc: Start with mock worker (no real upstream calls — for load testing)
+    cmds:
+      - docker compose --profile mock up -d proxy worker-mock kafka redis
+
+  docker:down:
+    desc: Stop and remove all containers
+    cmds:
+      - docker compose down
+
+  docker:logs:
+    desc: Follow logs for all containers
+    cmds:
+      - docker compose logs -f
+
+  docker:logs:proxy:
+    desc: Follow proxy logs
+    cmds:
+      - docker compose logs -f proxy
+
+  docker:logs:worker:
+    desc: Follow worker logs
+    cmds:
+      - docker compose logs -f worker
+
+  # ------------------------------------------------------------
+  # LocalStack / ECS simulation
+  # ------------------------------------------------------------
+  localstack:up:
+    desc: Start LocalStack container
+    cmds:
+      - docker compose up -d localstack
+      - |
+        echo "Waiting for LocalStack..."
+        until curl -sf http://localhost:4566/_localstack/health | grep -q '"running"'; do sleep 2; done
+        echo "LocalStack is ready at http://localhost:4566"
+
+  localstack:bootstrap:
+    desc: Register ECS cluster, task definitions, services, secrets, and log groups in LocalStack
+    cmds:
+      - ./deploy/localstack/bootstrap.sh
+
+  localstack:status:
+    desc: Print ECS resource status from LocalStack
+    env:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+    cmds:
+      - |
+        ENDPOINT=http://localhost:4566
+        echo "=== Task Definitions ==="
+        aws --endpoint-url=$ENDPOINT ecs list-task-definitions --output table
+        echo ""
+        echo "=== Services ==="
+        aws --endpoint-url=$ENDPOINT ecs list-services --cluster drpc-cluster --output table
+        echo ""
+        echo "=== Secrets ==="
+        aws --endpoint-url=$ENDPOINT secretsmanager list-secrets --output table
+
+  localstack:clean:
+    desc: Delete all LocalStack ECS resources (cluster, services, task definitions)
+    env:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+    cmds:
+      - |
+        ENDPOINT=http://localhost:4566
+        for SVC in drpc-proxy-service drpc-worker-service; do
+          aws --endpoint-url=$ENDPOINT ecs update-service --cluster drpc-cluster --service $SVC --desired-count 0 2>/dev/null || true
+          aws --endpoint-url=$ENDPOINT ecs delete-service --cluster drpc-cluster --service $SVC 2>/dev/null || true
+        done
+        aws --endpoint-url=$ENDPOINT ecs delete-cluster --cluster drpc-cluster 2>/dev/null || true
+        echo "LocalStack ECS resources removed"
+
+  # ------------------------------------------------------------
+  # Terraform (real AWS)
+  # ------------------------------------------------------------
+  tf:init:
+    desc: "Initialise Terraform (download providers)"
+    dir: terraform
+    cmds:
+      - terraform init
+
+  tf:validate:
+    desc: Validate Terraform configuration
+    dir: terraform
+    cmds:
+      - terraform validate
+
+  tf:plan:
+    desc: "Preview a Terraform deployment to real AWS"
+    dir: terraform
+    cmds:
+      - terraform plan
+
+  tf:apply:
+    desc: "Apply Terraform changes to real AWS (prompts for confirmation)"
+    dir: terraform
+    cmds:
+      - terraform apply
+
+  tf:destroy:
+    desc: "Destroy all real-AWS Terraform-managed resources (prompts for confirmation)"
+    dir: terraform
+    cmds:
+      - terraform destroy
+
+  # ── Terraform against LocalStack ──────────────────────────────────────────
+
+  tf:local:init:
+    desc: "Initialise Terraform targeting LocalStack"
+    dir: terraform
+    env:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+    cmds:
+      - terraform init
+
+  tf:local:plan:
+    desc: "Preview Terraform changes against LocalStack"
+    dir: terraform
+    env:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+    cmds:
+      - terraform plan -var-file=localstack.tfvars
+
+  tf:local:apply:
+    desc: "Apply Terraform changes to LocalStack (auto-approves)"
+    dir: terraform
+    env:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+    cmds:
+      - terraform apply -var-file=localstack.tfvars -auto-approve
+
+  tf:local:destroy:
+    desc: "Destroy LocalStack Terraform resources (auto-approves)"
+    dir: terraform
+    env:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+    cmds:
+      - terraform destroy -var-file=localstack.tfvars -auto-approve
+
+  # ── Push images to ECR ────────────────────────────────────────────────────
+
+  tf:push:
+    desc: "Build Docker images and push to ECR repositories created by Terraform"
+    dir: terraform
+    vars:
+      PROXY_URL:
+        sh: terraform output -raw proxy_ecr_repository_url
+      WORKER_URL:
+        sh: terraform output -raw worker_ecr_repository_url
+      REGION:
+        sh: terraform output -raw aws_region 2>/dev/null || echo "us-east-1"
+    cmds:
+      - aws ecr get-login-password --region {{.REGION}} | docker login --username AWS --password-stdin {{.PROXY_URL}}
+      - docker build -f ../Dockerfile.proxy -t {{.PROXY_URL}}:{{.IMAGE_TAG | default "latest"}} ..
+      - docker push {{.PROXY_URL}}:{{.IMAGE_TAG | default "latest"}}
+      - docker build -f ../Dockerfile.worker -t {{.WORKER_URL}}:{{.IMAGE_TAG | default "latest"}} ..
+      - docker push {{.WORKER_URL}}:{{.IMAGE_TAG | default "latest"}}
+
+  tf:push:local:
+    desc: "Build and push images to LocalStack ECR (uses docker-compose image names)"
+    cmds:
+      - task: docker:build
+      - |
+        ENDPOINT=http://localhost:4566
+        AWS_REGION=us-east-1
+        ACCOUNT=000000000000
+        REGISTRY="${ACCOUNT}.dkr.ecr.${AWS_REGION}.localhost.localstack.cloud:4566"
+        aws --endpoint-url=$ENDPOINT ecr get-login-password --region $AWS_REGION \
+          | docker login --username AWS --password-stdin $REGISTRY
+        docker tag drpc-proxy:local  $REGISTRY/drpc-local-proxy:latest
+        docker push $REGISTRY/drpc-local-proxy:latest
+        docker tag drpc-worker:local $REGISTRY/drpc-local-worker:latest
+        docker push $REGISTRY/drpc-local-worker:latest
+
+  # ------------------------------------------------------------
   # Default
   # ------------------------------------------------------------
   default:
