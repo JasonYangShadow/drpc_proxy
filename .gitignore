@@ -1,0 +1,85 @@
+# -----------------------------
+# Go build artifacts
+# -----------------------------
+bin/
+build/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go modules vendor directory
+vendor/
+
+# Go coverage files
+*.cover
+coverage.txt
+coverage.out
+
+# -----------------------------
+# IDE / Editor
+# -----------------------------
+# VSCode
+.vscode/
+.history/
+*.code-workspace
+
+# JetBrains (if ever used)
+.idea/
+
+# -----------------------------
+# Docker
+# -----------------------------
+# Docker build cache
+**/.dockerignore~
+**/Dockerfile~
+docker-compose.override.yml
+docker-compose.local.yml
+
+# -----------------------------
+# Logs / Temp files
+# -----------------------------
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+.DS_Store
+
+# -----------------------------
+# Air (Go hot reload)
+# -----------------------------
+.air/
+.air.toml~
+tmp/
+
+# -----------------------------
+# Delve debugger
+# -----------------------------
+__debug_bin
+debug
+debug.test
+
+# -----------------------------
+# Task / Just
+# -----------------------------
+.task/
+.just/
+
+# -----------------------------
+# Go workspace (Go 1.18+)
+# -----------------------------
+go.work
+go.work.sum
+
+# -----------------------------
+# Local environment files
+# -----------------------------
+.env
+.env.*
+.envrc
