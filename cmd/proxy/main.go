@@ -3,10 +3,10 @@ package main
 import (
 	"log"
 	"net/http"
-	"time"
 
 	"github.com/spf13/cobra"
 
+	"drpc_proxy.com/internal"
 	"drpc_proxy.com/internal/kafka"
 	"drpc_proxy.com/internal/proxy"
 	"drpc_proxy.com/internal/redis"
@@ -61,11 +61,13 @@ func runProxy(cmd *cobra.Command, args []string) {
 	http.HandleFunc("/result/", handler.HandleResult)
 
 	srv := &http.Server{
-		Addr:         ":" + port,
-		Handler:      nil,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:              ":" + port,
+		Handler:           nil,
+		ReadTimeout:       internal.HttpReadTimeout,
+		WriteTimeout:      internal.HttpWriteTimeout,
+		IdleTimeout:       internal.HttpIdleTimeout,
+		MaxHeaderBytes:    1 << 20, // 1MB
+		ReadHeaderTimeout: internal.HttpReadTimeout,
 	}
 
 	log.Printf("Proxy running on :%s (kafka=%s redis=%s)", port, kafkaAddr, redisAddr)

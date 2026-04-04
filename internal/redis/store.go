@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"drpc_proxy.com/internal"
 	"github.com/bytedance/sonic"
 	"github.com/redis/go-redis/v9"
 )
@@ -20,14 +21,15 @@ type Status struct {
 func NewStore(addr string) *Store {
 	return &Store{
 		client: redis.NewClient(&redis.Options{
-			Addr: addr,
+			Addr:         addr,
+			PoolSize:     100,
+			MinIdleConns: 10,
+			MaxRetries:   3,
+			DialTimeout:  internal.RedisDialTimeout,
+			ReadTimeout:  internal.RedisReadTimeout,
+			WriteTimeout: internal.RedisWriteTimeout,
 		}),
 	}
-}
-
-func (s *Store) Save(id string, data any, ttl time.Duration) error {
-	b, _ := sonic.Marshal(data)
-	return s.client.Set(context.Background(), "rpc:result:"+id, b, ttl).Err()
 }
 
 func (s *Store) SaveWithContext(ctx context.Context, id string, data any, ttl time.Duration) error {
@@ -36,10 +38,6 @@ func (s *Store) SaveWithContext(ctx context.Context, id string, data any, ttl ti
 		return err
 	}
 	return s.client.Set(ctx, "rpc:result:"+id, b, ttl).Err()
-}
-
-func (s *Store) Get(id string) ([]byte, error) {
-	return s.client.Get(context.Background(), "rpc:result:"+id).Bytes()
 }
 
 func (s *Store) GetWithContext(ctx context.Context, id string) ([]byte, error) {
@@ -52,7 +50,10 @@ func (s *Store) SetStatus(ctx context.Context, id string, status string, ttl tim
 		Status:    status,
 		UpdatedAt: time.Now().Unix(),
 	}
-	b, _ := sonic.Marshal(&st)
+	b, err := sonic.Marshal(&st)
+	if err != nil {
+		return err
+	}
 	return s.client.Set(ctx, "rpc:status:"+id, b, ttl).Err()
 }
 

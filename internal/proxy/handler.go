@@ -83,7 +83,7 @@ func (h *Handler) kafkaWorker() {
 
 		if len(b) > len(buf) {
 			redisCtx, cancel := context.WithTimeout(bgCtx, internal.RedisTimeout)
-			_ = h.store.SetStatus(redisCtx, msg.RequestID, "failed: payload too large > 64KB", internal.StatusTTL)
+			_ = h.store.SetStatus(redisCtx, msg.RequestID, "failed: payload too large > %d KB", internal.DefaultBufSize/1024)
 			cancel()
 			continue
 		}
@@ -157,7 +157,7 @@ func (h *Handler) HandleRPC(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := Response{
-		Status:    "queued",
+		Status:    "accepted",
 		RequestID: reqID,
 	}
 
@@ -188,7 +188,7 @@ func (h *Handler) HandleResult(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		if st.Status == "queued" || st.Status == "processing" {
+		if st.Status == "queued" {
 			w.WriteHeader(http.StatusAccepted)
 			_ = sonic.ConfigDefault.NewEncoder(w).Encode(Response{
 				Status:    st.Status,

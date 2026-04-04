@@ -12,7 +12,7 @@ import (
 type Consumer struct {
 	reader  *kafka.Reader
 	workers int
-	jobCh   chan []byte
+	jobCh   chan kafka.Message
 }
 
 func NewConsumer(broker, group string, workers int) (*Consumer, error) {
@@ -27,13 +27,13 @@ func NewConsumer(broker, group string, workers int) (*Consumer, error) {
 		HeartbeatInterval: 3 * time.Second,
 		SessionTimeout:    30 * time.Second,
 		RebalanceTimeout:  30 * time.Second,
-		CommitInterval:    0,
+		CommitInterval:    -1, // manual confirmation
 	})
 
 	return &Consumer{
 		reader:  r,
 		workers: workers,
-		jobCh:   make(chan []byte, workers*2),
+		jobCh:   make(chan kafka.Message, workers*2),
 	}, nil
 }
 
@@ -41,15 +41,25 @@ func (c *Consumer) Consume(handler func([]byte) error) {
 	for i := 0; i < c.workers; i++ {
 		go func(id int) {
 			for msg := range c.jobCh {
-				if err := handler(msg); err != nil {
+				if err := handler(msg.Value); err != nil {
 					log.Printf("[worker %d] handler error: %v", id, err)
+					continue
 				}
+
+				// manual confirmation
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				if err := c.reader.CommitMessages(ctx, msg); err != nil {
+					log.Printf("[worker %d] commit error: %v", id, err)
+				}
+				cancel()
 			}
 		}(i)
 	}
 
+	bgCtx := context.Background()
 	for {
-		ctx, cancel := context.WithTimeout(context.Background(), internal.KafkaTimeout)
+		deadline := time.Now().Add(internal.KafkaTimeout)
+		ctx, cancel := context.WithDeadline(bgCtx, deadline)
 		msg, err := c.reader.ReadMessage(ctx)
 		cancel()
 
@@ -58,7 +68,6 @@ func (c *Consumer) Consume(handler func([]byte) error) {
 			continue
 		}
 
-		// 投递到 worker pool
-		c.jobCh <- msg.Value
+		c.jobCh <- msg
 	}
 }

@@ -16,7 +16,7 @@ func NewProducer(broker string) (*Producer, error) {
 		Addr:         kafka.TCP(broker),
 		Topic:        "rpc_requests",
 		Balancer:     &kafka.Hash{},
-		Async:        true,
+		Async:        false,
 		BatchSize:    100, // batch up to 100 messages
 		BatchTimeout: 10 * time.Millisecond,
 		Compression:  kafka.Snappy,
