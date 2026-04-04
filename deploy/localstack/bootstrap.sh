@@ -3,7 +3,7 @@
 #
 # Registers all AWS resources (ECS cluster, task definitions, services, ECR
 # repos, log groups, IAM roles, secrets) against the running LocalStack
-# instance at http://localhost:4566.
+# instance at http://localstack:4566.
 #
 # Usage:
 #   ./deploy/localstack/bootstrap.sh [--endpoint-url <url>]
@@ -20,7 +20,7 @@
 set -euo pipefail
 
 # ── Config ────────────────────────────────────────────────────────────────────
-ENDPOINT="${LOCALSTACK_ENDPOINT:-http://localhost:4566}"
+ENDPOINT="${LOCALSTACK_ENDPOINT:-http://localstack:4566}"
 REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 ACCOUNT="000000000000"   # LocalStack default account ID
 CLUSTER="drpc-cluster"

@@ -2,7 +2,7 @@
 # Usage: task tf:local:apply
 #        terraform apply -var-file=localstack.tfvars
 
-localstack_endpoint = "http://localhost:4566"
+localstack_endpoint = "http://localstack:4566"
 environment         = "local"
 aws_region          = "us-east-1"
 
@@ -10,9 +10,9 @@ aws_region          = "us-east-1"
 availability_zones = ["us-east-1a"]
 
 # Lightweight compute for local simulation.
-proxy_cpu    = 256
-proxy_memory = 512
-worker_cpu   = 512
+proxy_cpu     = 256
+proxy_memory  = 512
+worker_cpu    = 512
 worker_memory = 1024
 
 proxy_desired_count  = 1

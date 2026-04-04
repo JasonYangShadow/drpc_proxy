@@ -3,7 +3,7 @@
     "dockerFile": "Dockerfile",
     "features": {
         "ghcr.io/devcontainers/features/go:1": {
-            "version": "1.25"
+            "version": "1.25.8"
         }
     },
     "mounts": [

@@ -99,16 +99,36 @@ tasks:
     desc: Start full local stack (Kafka, Redis, LocalStack, proxy, worker)
     cmds:
       - docker compose up -d
+      - task: _network:join
+
 
   docker:up:infra:
     desc: Start infrastructure only (Kafka, Redis, LocalStack) — no app containers
     cmds:
       - docker compose up -d kafka redis localstack
+      - task: _network:join
+
 
   docker:up:mock:
     desc: Start with mock worker (no real upstream calls — for load testing)
     cmds:
       - docker compose --profile mock up -d proxy worker-mock kafka redis
+      - task: _network:join
+
+  _network:join:
+    desc: Connect this dev container to the drpc docker-compose network (internal)
+    internal: true
+    cmds:
+      - |
+        NETWORK=drpc_proxy_drpc
+        SELF=$(cat /proc/self/cgroup | grep 'docker' | head -1 | sed 's/.*docker[-\/]//' | cut -c1-12)
+        if [ -z "$SELF" ]; then
+          echo "Cannot determine container ID — skipping network join"
+          exit 0
+        fi
+        docker network connect "$NETWORK" "$SELF" 2>/dev/null \
+          && echo "Joined Docker network: $NETWORK" \
+          || echo "Already on network: $NETWORK (or not in a container)"
 
   docker:down:
     desc: Stop and remove all containers
@@ -139,8 +159,8 @@ tasks:
       - docker compose up -d localstack
       - |
         echo "Waiting for LocalStack..."
-        until curl -sf http://localhost:4566/_localstack/health | grep -q '"running"'; do sleep 2; done
-        echo "LocalStack is ready at http://localhost:4566"
+        until curl -sf http://localstack:4566/_localstack/health | grep -q '"running"'; do sleep 2; done
+        echo "LocalStack is ready at http://localstack:4566"
 
   localstack:bootstrap:
     desc: Register ECS cluster, task definitions, services, secrets, and log groups in LocalStack
@@ -155,7 +175,7 @@ tasks:
       AWS_DEFAULT_REGION: us-east-1
     cmds:
       - |
-        ENDPOINT=http://localhost:4566
+        ENDPOINT=http://localstack:4566
         echo "=== Task Definitions ==="
         aws --endpoint-url=$ENDPOINT ecs list-task-definitions --output table
         echo ""
@@ -173,7 +193,7 @@ tasks:
       AWS_DEFAULT_REGION: us-east-1
     cmds:
       - |
-        ENDPOINT=http://localhost:4566
+        ENDPOINT=http://localstack:4566
         for SVC in drpc-proxy-service drpc-worker-service; do
           aws --endpoint-url=$ENDPOINT ecs update-service --cluster drpc-cluster --service $SVC --desired-count 0 2>/dev/null || true
           aws --endpoint-url=$ENDPOINT ecs delete-service --cluster drpc-cluster --service $SVC 2>/dev/null || true
@@ -280,7 +300,7 @@ tasks:
     cmds:
       - task: docker:build
       - |
-        ENDPOINT=http://localhost:4566
+        ENDPOINT=http://localstack:4566
         AWS_REGION=us-east-1
         ACCOUNT=000000000000
         REGISTRY="${ACCOUNT}.dkr.ecr.${AWS_REGION}.localhost.localstack.cloud:4566"
