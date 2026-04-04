@@ -19,6 +19,7 @@ var (
 	redisAddr string
 	groupID   string
 	workers   int
+	useMock   bool
 )
 
 func main() {
@@ -38,6 +39,7 @@ func main() {
 
 	workerCmd.Flags().StringVar(&groupID, "group", "rpc-workers", "Kafka consumer group ID")
 	workerCmd.Flags().IntVar(&workers, "workers", 20, "Number of worker goroutines")
+	workerCmd.Flags().BoolVar(&useMock, "mock", false, "Use mock processor (no real upstream calls, for load/mock testing)")
 
 	rootCmd.AddCommand(workerCmd)
 
@@ -52,7 +54,13 @@ func runWorker(cmd *cobra.Command, args []string) {
 		log.Fatal(err)
 	}
 
-	processor := worker.NewProcessor()
+	var handler worker.MessageHandler
+	if useMock {
+		log.Println("Mock mode: using MockProcessor (no real upstream calls)")
+		handler = worker.NewMockProcessor()
+	} else {
+		handler = worker.NewProcessor()
+	}
 
 	// Setup graceful shutdown
 	sigCh := make(chan os.Signal, 1)
@@ -60,9 +68,9 @@ func runWorker(cmd *cobra.Command, args []string) {
 
 	// Start consumer in a goroutine
 	go func() {
-		log.Printf("Worker started (kafka=%s group=%s workers=%d redis=%s)",
-			kafkaAddr, groupID, workers, redisAddr)
-		consumer.Consume(processor.Process)
+		log.Printf("Worker started (kafka=%s group=%s workers=%d redis=%s mock=%v)",
+			kafkaAddr, groupID, workers, redisAddr, useMock)
+		consumer.Consume(handler.Process)
 	}()
 
 	// Wait for interrupt signal
@@ -79,7 +87,7 @@ func runWorker(cmd *cobra.Command, args []string) {
 	}
 
 	// Close processor after all workers have finished
-	processor.Close()
+	handler.Close()
 
 	log.Println("Worker shutdown complete")
 }

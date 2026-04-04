@@ -23,6 +23,12 @@ func (e *upstreamError) Error() string {
 	return fmt.Sprintf("upstream error (status %d): %s", e.statusCode, e.body)
 }
 
+// MessageHandler is the interface satisfied by both Processor and MockProcessor.
+type MessageHandler interface {
+	Process(msg []byte) ([]byte, error)
+	Close()
+}
+
 var upstreamClient = &http.Client{
 	Transport: &http.Transport{
 		MaxIdleConns:          internal.UpstreamMaxIdleConns,
