@@ -9,8 +9,15 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// redisClient is the subset of *redis.Client used by Store.
+type redisClient interface {
+	Set(ctx context.Context, key string, value interface{}, expiration time.Duration) *redis.StatusCmd
+	Get(ctx context.Context, key string) *redis.StringCmd
+	Close() error
+}
+
 type Store struct {
-	client *redis.Client
+	client redisClient
 }
 
 func NewStore(addr string) *Store {

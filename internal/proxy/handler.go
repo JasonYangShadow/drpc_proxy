@@ -8,19 +8,28 @@ import (
 	"time"
 
 	"drpc_proxy.com/internal"
-	"drpc_proxy.com/internal/kafka"
-	"drpc_proxy.com/internal/redis"
 	"github.com/bytedance/sonic"
 	"github.com/google/uuid"
 )
+
+// responseStorer is the subset of redis.Store used by Handler.
+type responseStorer interface {
+	SaveResponse(ctx context.Context, resp *internal.Response, ttl time.Duration) error
+	GetResponse(ctx context.Context, requestID string) (*internal.Response, error)
+}
+
+// messageSender is the subset of kafka.Producer used by Handler.
+type messageSender interface {
+	SendWithContext(ctx context.Context, key string, value []byte) error
+}
 
 type ErrorResponse struct {
 	Error string `json:"error"`
 }
 
 type Handler struct {
-	producer  *kafka.Producer
-	store     *redis.Store
+	producer  messageSender
+	store     responseStorer
 	semaphore chan struct{}
 
 	kafkaCh   chan *internal.KafkaMessage
@@ -28,7 +37,7 @@ type Handler struct {
 	wg        sync.WaitGroup
 }
 
-func NewHandler(p *kafka.Producer, s *redis.Store, maxConcurrent int, kafkaWorkers int) *Handler {
+func NewHandler(p messageSender, s responseStorer, maxConcurrent int, kafkaWorkers int) *Handler {
 	if maxConcurrent <= 0 {
 		maxConcurrent = internal.DefaultMaxConcurrent
 	}

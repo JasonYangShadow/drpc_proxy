@@ -7,8 +7,14 @@ import (
 	"github.com/segmentio/kafka-go"
 )
 
+// kafkaWriter is the subset of *kafka.Writer used by Producer.
+type kafkaWriter interface {
+	WriteMessages(ctx context.Context, msgs ...kafka.Message) error
+	Close() error
+}
+
 type Producer struct {
-	writer *kafka.Writer
+	writer kafkaWriter
 }
 
 func NewProducer(broker string) (*Producer, error) {

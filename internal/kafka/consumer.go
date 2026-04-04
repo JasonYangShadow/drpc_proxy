@@ -7,16 +7,29 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"drpc_proxy.com/internal"
 	"drpc_proxy.com/internal/redis"
 	"github.com/segmentio/kafka-go"
 )
 
+// dlqSender is the subset of *kafka.Writer used by Consumer.
+type dlqSender interface {
+	WriteMessages(ctx context.Context, msgs ...kafka.Message) error
+	Close() error
+}
+
+// resultSaver is the subset of *redis.Store used by Consumer.
+type resultSaver interface {
+	SaveResponse(ctx context.Context, resp *internal.Response, ttl time.Duration) error
+	Close(ctx context.Context) error
+}
+
 type Consumer struct {
 	reader    *kafka.Reader
-	dlqWriter *kafka.Writer
-	store     *redis.Store
+	dlqWriter dlqSender
+	store     resultSaver
 	workers   int
 	jobCh     chan kafka.Message
 	ctx       context.Context

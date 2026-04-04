@@ -1,0 +1,94 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: "3"
+
+vars:
+  PROXY_BIN: bin/proxy
+  WORKER_BIN: bin/worker
+  GO_FLAGS: -mod=vendor
+
+env:
+  CGO_ENABLED: "0"
+
+tasks:
+  # ------------------------------------------------------------
+  # Build
+  # ------------------------------------------------------------
+  build:proxy:
+    desc: Build the proxy binary
+    cmds:
+      - mkdir -p bin
+      - go build {{.GO_FLAGS}} -o {{.PROXY_BIN}} ./cmd/proxy
+
+  build:worker:
+    desc: Build the worker binary
+    cmds:
+      - mkdir -p bin
+      - go build {{.GO_FLAGS}} -o {{.WORKER_BIN}} ./cmd/worker
+
+  build:
+    desc: Build both binaries
+    deps: [build:proxy, build:worker]
+
+  # ------------------------------------------------------------
+  # Tests
+  # ------------------------------------------------------------
+  test:unit:
+    desc: Run all unit tests (no external dependencies required)
+    env:
+      CGO_ENABLED: "1"
+    cmds:
+      - go test {{.GO_FLAGS}} -v -race -count=1 -timeout 60s ./internal/...
+
+  test:e2e:
+    desc: "Run end-to-end tests (requires: Kafka, Redis, proxy, and worker running)"
+    summary: |
+      Set environment variables before running:
+        KAFKA_ADDR=localhost:9092
+        REDIS_ADDR=localhost:6379
+        PROXY_ADDR=http://localhost:8080
+    cmds:
+      - go test {{.GO_FLAGS}} -v -tags e2e -timeout 120s ./tests/e2e/
+
+  test:
+    desc: Run unit tests (use 'task test:e2e' for end-to-end)
+    deps: [test:unit]
+
+  # ------------------------------------------------------------
+  # Code quality
+  # ------------------------------------------------------------
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet {{.GO_FLAGS}} ./...
+
+  lint:
+    desc: Run go vet across all packages
+    deps: [vet]
+
+  # ------------------------------------------------------------
+  # Run (development)
+  # ------------------------------------------------------------
+  run:proxy:
+    desc: "Run the proxy server (set KAFKA_ADDR, REDIS_ADDR as needed)"
+    cmds:
+      - go run {{.GO_FLAGS}} ./cmd/proxy
+
+  run:worker:
+    desc: "Run the worker (set KAFKA_ADDR, REDIS_ADDR as needed)"
+    cmds:
+      - go run {{.GO_FLAGS}} ./cmd/worker
+
+  # ------------------------------------------------------------
+  # Clean
+  # ------------------------------------------------------------
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - rm -rf bin/
+
+  # ------------------------------------------------------------
+  # Default
+  # ------------------------------------------------------------
+  default:
+    desc: Build both binaries (default task)
+    deps: [build]

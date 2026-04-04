@@ -35,8 +35,9 @@ var upstreamClient = &http.Client{
 }
 
 type Processor struct {
-	ctx    context.Context
-	cancel context.CancelFunc
+	ctx         context.Context
+	cancel      context.CancelFunc
+	upstreamURL string // overridable for tests; defaults to internal.UpstreamURL
 }
 
 func NewProcessor() *Processor {
@@ -102,7 +103,11 @@ func (p *Processor) callUpstream(raw []byte) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), internal.UpstreamTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "POST", internal.UpstreamURL, bytes.NewReader(raw))
+	url := p.upstreamURL
+	if url == "" {
+		url = internal.UpstreamURL
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(raw))
 	if err != nil {
 		return nil, err
 	}
@@ -118,6 +123,11 @@ func (p *Processor) callUpstream(raw []byte) ([]byte, error) {
 	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, internal.MaxUpstreamResponseSize))
 		return nil, &upstreamError{statusCode: resp.StatusCode, body: body}
+	}
+
+	// retryable 5xx / unexpected status
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("upstream returned status %d", resp.StatusCode)
 	}
 
 	limited := io.LimitReader(resp.Body, internal.MaxUpstreamResponseSize)
