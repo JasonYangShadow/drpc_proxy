@@ -24,26 +24,30 @@ tasks:
       - docker compose logs -f
 
   docker:logs:proxy:
-    desc: "Follow logs of the running ECS proxy container"
+    desc: "Follow logs of all running ECS proxy containers"
     cmds:
       - |
         IDS=$(docker ps -q)
         [ -z "$IDS" ] && echo "No ECS containers running" && exit 1
-        NAME=$(docker inspect $IDS 2>/dev/null | python3 -c "import sys,json; cs=json.load(sys.stdin); r=[c['Id'][:12] for c in cs if 'drpc-local-proxy' in c.get('Config',{}).get('Image','')]; print(r[0] if r else '')")
-        [ -z "$NAME" ] && echo "No proxy container running" && exit 1
-        echo "Following logs for: $NAME"
-        docker logs -f "$NAME"
+        NAMES=$(docker inspect $IDS 2>/dev/null | python3 -c "import sys,json; cs=json.load(sys.stdin); r=[c['Id'][:12] for c in cs if 'drpc-local-proxy' in c.get('Config',{}).get('Image','')]; print('\n'.join(r))")
+        [ -z "$NAMES" ] && echo "No proxy containers running" && exit 1
+        echo "Following logs for proxy containers:"
+        echo "$NAMES"
+        echo "$NAMES" | xargs -P0 -I{} docker logs -f --timestamps {} &
+        wait
 
   docker:logs:worker:
-    desc: "Follow logs of the running ECS worker container"
+    desc: "Follow logs of all running ECS worker containers"
     cmds:
       - |
         IDS=$(docker ps -q)
         [ -z "$IDS" ] && echo "No ECS containers running" && exit 1
-        NAME=$(docker inspect $IDS 2>/dev/null | python3 -c "import sys,json; cs=json.load(sys.stdin); r=[c['Id'][:12] for c in cs if 'drpc-local-worker' in c.get('Config',{}).get('Image','')]; print(r[0] if r else '')")
-        [ -z "$NAME" ] && echo "No worker container running" && exit 1
-        echo "Following logs for: $NAME"
-        docker logs -f "$NAME"
+        NAMES=$(docker inspect $IDS 2>/dev/null | python3 -c "import sys,json; cs=json.load(sys.stdin); r=[c['Id'][:12] for c in cs if 'drpc-local-worker' in c.get('Config',{}).get('Image','')]; print('\n'.join(r))")
+        [ -z "$NAMES" ] && echo "No worker containers running" && exit 1
+        echo "Following logs for worker containers:"
+        echo "$NAMES"
+        echo "$NAMES" | xargs -P0 -I{} docker logs -f --timestamps {} &
+        wait
 
   # ── Terraform (LocalStack) ────────────────────────────────────────────────
 
@@ -108,6 +112,50 @@ tasks:
         echo "Running e2e tests against $ADDR"
         PROXY_ADDR="$ADDR" go test {{.GO_FLAGS}} -v -tags e2e -timeout 120s ./tests/e2e/
 
+  test:manual:
+    desc: "Send a single eth_blockNumber RPC request and poll until result (auto-detects proxy IP)"
+    vars:
+      METHOD: '{{.METHOD | default "eth_blockNumber"}}'
+      PARAMS: '{{.PARAMS | default "[]"}}'
+    cmds:
+      - |
+        # Resolve proxy address
+        if [ -n "$PROXY_ADDR" ]; then
+          ADDR="$PROXY_ADDR"
+        else
+          IDS=$(docker ps -q)
+          PROXY_IP=$(docker inspect $IDS 2>/dev/null | python3 -c "import sys,json; cs=json.load(sys.stdin); r=[list(c.get('NetworkSettings',{}).get('Networks',{}).values())[0]['IPAddress'] for c in cs if 'drpc-local-proxy' in c.get('Config',{}).get('Image','') and c.get('NetworkSettings',{}).get('Networks',{})]; print(r[0] if r else '')")
+          [ -z "$PROXY_IP" ] && echo "No proxy container found — run task local:push first" && exit 1
+          ADDR="http://$PROXY_IP:8545"
+        fi
+        echo "Proxy: $ADDR"
+
+        # Submit request
+        PAYLOAD="{\"jsonrpc\":\"2.0\",\"method\":\"{{.METHOD}}\",\"params\":{{.PARAMS}},\"id\":1}"
+        echo "→ POST $ADDR/rpc  $PAYLOAD"
+        RESPONSE=$(curl -sf -X POST "$ADDR/rpc" \
+          -H 'Content-Type: application/json' \
+          -d "$PAYLOAD")
+        echo "← $RESPONSE"
+        REQUEST_ID=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['request_id'])")
+        echo "  request_id: $REQUEST_ID"
+
+        # Poll until terminal status
+        echo "Polling for result..."
+        for i in $(seq 1 30); do
+          sleep 1
+          RESULT=$(curl -sf "$ADDR/result/?request_id=$REQUEST_ID" || true)
+          STATUS=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null || true)
+          echo "  [$i] status=$STATUS"
+          if [ "$STATUS" = "completed" ] || [ "$STATUS" = "failed" ]; then
+            echo "← Result:"
+            echo "$RESULT" | python3 -m json.tool
+            exit 0
+          fi
+        done
+        echo "Timed out waiting for result"
+        exit 1
+
   # ============================================================
   # INTERNAL — hidden from `task --list`
   # ============================================================
@@ -147,6 +195,23 @@ tasks:
     internal: true
     dir: terraform
     cmds:
+      # Flush ECR images first — terraform destroy fails on non-empty repositories.
+      - |
+        REGION=$(terraform output -raw aws_region 2>/dev/null || echo "us-east-1")
+        for REPO in \
+          $(aws ecr describe-repositories --region "$REGION" \
+              --query 'repositories[*].repositoryName' --output text 2>/dev/null | tr '\t' '\n' | grep '^drpc-'); do
+          IMAGES=$(aws ecr list-images --region "$REGION" \
+            --repository-name "$REPO" \
+            --query 'imageIds[*]' --output json 2>/dev/null || echo "[]")
+          if [ "$IMAGES" != "[]" ] && [ "$IMAGES" != "null" ] && [ -n "$IMAGES" ]; then
+            echo "Flushing ECR images from $REPO..."
+            aws ecr batch-delete-image --region "$REGION" \
+              --repository-name "$REPO" \
+              --image-ids "$IMAGES" >/dev/null 2>&1 || true
+          fi
+        done
+      # ECS drains tasks automatically on real AWS — no manual scale-down needed.
       - terraform destroy
 
   _tf:local:apply:
@@ -167,6 +232,17 @@ tasks:
           terraform state rm $RESOURCES
         fi
       - terraform apply -var-file=localstack.tfvars -auto-approve {{.TF_EXTRA_ARGS}}
+      # Force-restart all ECS services so running tasks pick up the new task definition.
+      - |
+        CLUSTER=$(terraform output -raw ecs_cluster_name 2>/dev/null || true)
+        if [ -n "$CLUSTER" ]; then
+          for SVC in $(aws --no-cli-pager --endpoint-url=http://localstack:4566 ecs list-services \
+              --cluster "$CLUSTER" --query 'serviceArns[]' --output text 2>/dev/null); do
+            aws --no-cli-pager --endpoint-url=http://localstack:4566 ecs update-service \
+              --cluster "$CLUSTER" --service "$SVC" --force-new-deployment >/dev/null 2>&1 || true
+          done
+          echo "ECS services redeployed"
+        fi
 
   _tf:local:destroy:
     internal: true
@@ -184,7 +260,27 @@ tasks:
             aws --endpoint-url=http://localstack:4566 ecs update-service --cluster "$CLUSTER" --service "$SVC" --desired-count 0 >/dev/null 2>&1 || true
           done
         fi
+      # LocalStack ECR ignores force_delete — flush images manually before destroy.
+      - |
+        for REPO in drpc-local-proxy drpc-local-worker; do
+          IMAGES=$(aws --endpoint-url=http://localstack:4566 ecr list-images \
+            --repository-name "$REPO" \
+            --query 'imageIds[*]' --output json 2>/dev/null || echo "[]")
+          if [ "$IMAGES" != "[]" ] && [ -n "$IMAGES" ]; then
+            aws --endpoint-url=http://localstack:4566 ecr batch-delete-image \
+              --repository-name "$REPO" \
+              --image-ids "$IMAGES" >/dev/null 2>&1 || true
+          fi
+        done
       - terraform destroy -var-file=localstack.tfvars -auto-approve -refresh=false
+      # LocalStack doesn't always remove the Docker containers it spawned for ECS tasks.
+      # Force-remove any lingering ls-ecs-drpc-local-* containers.
+      - |
+        LEFTOVER=$(docker ps -aq --filter "name=ls-ecs-drpc-local-" 2>/dev/null)
+        if [ -n "$LEFTOVER" ]; then
+          echo "Removing leftover ECS containers..."
+          docker rm -f $LEFTOVER >/dev/null 2>&1 || true
+        fi
 
   _tf:push:
     internal: true
@@ -221,3 +317,13 @@ tasks:
       - docker push {{.PROXY_URL}}:{{.IMAGE_TAG | default "latest"}}
       - docker build -f ../Dockerfile.worker -t {{.WORKER_URL}}:{{.IMAGE_TAG | default "latest"}} ..
       - docker push {{.WORKER_URL}}:{{.IMAGE_TAG | default "latest"}}
+      # Force ECS to pull the new images and restart all tasks.
+      - |
+        CLUSTER=$(terraform output -raw ecs_cluster_name 2>/dev/null || true)
+        if [ -n "$CLUSTER" ]; then
+          for SVC in $(aws --endpoint-url=http://localstack:4566 ecs list-services --cluster "$CLUSTER" --query 'serviceArns[]' --output text 2>/dev/null); do
+            aws --endpoint-url=http://localstack:4566 ecs update-service \
+              --cluster "$CLUSTER" --service "$SVC" --force-new-deployment >/dev/null 2>&1 || true
+          done
+          echo "ECS services redeployed"
+        fi

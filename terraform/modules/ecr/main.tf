@@ -1,6 +1,7 @@
 resource "aws_ecr_repository" "proxy" {
   name                 = "${var.name}-proxy"
   image_tag_mutability = "MUTABLE"
+  force_delete         = var.is_localstack
 
   image_scanning_configuration {
     scan_on_push = !var.is_localstack
@@ -12,6 +13,7 @@ resource "aws_ecr_repository" "proxy" {
 resource "aws_ecr_repository" "worker" {
   name                 = "${var.name}-worker"
   image_tag_mutability = "MUTABLE"
+  force_delete         = var.is_localstack
 
   image_scanning_configuration {
     scan_on_push = !var.is_localstack
