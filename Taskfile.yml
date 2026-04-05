@@ -18,6 +18,18 @@ tasks:
     cmds:
       - docker compose down
 
+  monitoring:up:
+    desc: "Start Prometheus (port 9090) and Grafana (port 3000)"
+    cmds:
+      - docker compose up -d prometheus grafana
+      - echo "Prometheus → http://localhost:9090"
+      - echo "Grafana    → http://localhost:3000"
+
+  monitoring:down:
+    desc: "Stop Prometheus and Grafana"
+    cmds:
+      - docker compose stop prometheus grafana
+
   docker:logs:
     desc: "Follow logs for all containers (Ctrl-C to stop)"
     cmds:

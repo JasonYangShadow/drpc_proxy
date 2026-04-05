@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"drpc_proxy.com/internal"
+	"drpc_proxy.com/internal/metrics"
 	"github.com/bytedance/sonic"
 	"github.com/google/uuid"
 )
@@ -103,12 +104,14 @@ func (h *Handler) kafkaWorker() {
 
 		redisCtx, rcancel := context.WithTimeout(context.Background(), internal.RedisTimeout)
 		if err != nil {
+			metrics.ProxyKafkaErrorsTotal.Inc()
 			_ = h.store.SaveResponse(redisCtx, &internal.Response{
 				Status:    "failed",
 				RequestID: msg.RequestID,
 				Error:     err.Error(),
 			}, internal.StatusTTL)
 		} else {
+			metrics.ProxyKafkaSentTotal.Inc()
 			_ = h.store.SaveResponse(redisCtx, &internal.Response{
 				Status:    "queued",
 				RequestID: msg.RequestID,
@@ -119,6 +122,7 @@ func (h *Handler) kafkaWorker() {
 }
 
 func (h *Handler) HandleRPC(w http.ResponseWriter, r *http.Request) {
+	metrics.ProxyRequestsTotal.Inc()
 	select {
 	case h.semaphore <- struct{}{}:
 		defer func() { <-h.semaphore }()

@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
 
 	"drpc_proxy.com/internal"
@@ -77,6 +78,7 @@ func runProxy(cmd *cobra.Command, args []string) {
 	})
 	http.HandleFunc("/rpc", handler.HandleRPC)
 	http.HandleFunc("/result/", handler.HandleResult)
+	http.Handle("/metrics", promhttp.Handler())
 
 	srv := &http.Server{
 		Addr:              ":" + port,

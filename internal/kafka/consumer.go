@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"drpc_proxy.com/internal"
+	"drpc_proxy.com/internal/metrics"
 	"drpc_proxy.com/internal/redis"
 	"github.com/segmentio/kafka-go"
 )
@@ -90,7 +91,12 @@ func (c *Consumer) Consume(handler func([]byte) ([]byte, error)) {
 		go func(id int) {
 			defer c.wg.Done()
 			for msg := range c.jobCh {
-				if resp, err := handler(msg.Value); err != nil {
+				start := time.Now()
+				resp, err := handler(msg.Value)
+				metrics.WorkerProcessingDuration.Observe(time.Since(start).Seconds())
+
+				if err != nil {
+					metrics.WorkerMessagesProcessed.WithLabelValues("failure").Inc()
 					log.Printf("[worker %d] handler error: %v, sending to DLQ", id, err)
 
 					// Send to DLQ
@@ -99,12 +105,14 @@ func (c *Consumer) Consume(handler func([]byte) ([]byte, error)) {
 						// Don't commit the message if DLQ also fails
 						continue
 					}
+					metrics.WorkerDLQSentTotal.Inc()
 
 					// Save failure status to Redis
 					if saveErr := c.saveResponse(msg, nil, err); saveErr != nil {
 						log.Printf("[worker %d] failed to save failure status to Redis: %v", id, saveErr)
 					}
 				} else {
+					metrics.WorkerMessagesProcessed.WithLabelValues("success").Inc()
 					// Handler succeeded, save success response to Redis
 					if saveErr := c.saveResponse(msg, resp, nil); saveErr != nil {
 						log.Printf("[worker %d] failed to save response to Redis: %v", id, saveErr)

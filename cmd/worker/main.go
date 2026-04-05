@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
 
 	"drpc_proxy.com/internal"
@@ -15,11 +17,12 @@ import (
 )
 
 var (
-	kafkaAddr string
-	redisAddr string
-	groupID   string
-	workers   int
-	useMock   bool
+	kafkaAddr   string
+	redisAddr   string
+	groupID     string
+	workers     int
+	useMock     bool
+	metricsPort string
 )
 
 func main() {
@@ -49,6 +52,7 @@ func main() {
 	workerCmd.Flags().StringVar(&groupID, "group", "rpc-workers", "Kafka consumer group ID")
 	workerCmd.Flags().IntVar(&workers, "workers", 20, "Number of worker goroutines")
 	workerCmd.Flags().BoolVar(&useMock, "mock", false, "Use mock processor (no real upstream calls, for load/mock testing)")
+	workerCmd.Flags().StringVar(&metricsPort, "metrics-port", "2112", "Port to expose Prometheus /metrics endpoint")
 
 	rootCmd.AddCommand(workerCmd)
 
@@ -70,6 +74,16 @@ func runWorker(cmd *cobra.Command, args []string) {
 	} else {
 		handler = worker.NewProcessor()
 	}
+
+	// Start Prometheus metrics server
+	go func() {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", promhttp.Handler())
+		log.Printf("Metrics server listening on :%s", metricsPort)
+		if err := http.ListenAndServe(":"+metricsPort, mux); err != nil {
+			log.Printf("Metrics server error: %v", err)
+		}
+	}()
 
 	// Setup graceful shutdown
 	sigCh := make(chan os.Signal, 1)

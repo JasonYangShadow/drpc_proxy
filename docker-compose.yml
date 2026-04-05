@@ -144,6 +144,8 @@ services:
               "--group", "rpc-workers", "--workers", "20"]
     environment:
       - GOGC=100
+    ports:
+      - "2112:2112"
     depends_on:
       kafka:
         condition: service_healthy
@@ -174,9 +176,46 @@ services:
     networks:
       - drpc
 
+  # ── Monitoring ─────────────────────────────────────────────────────────────
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - --config.file=/config/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    volumes:
+      - ./deploy:/config:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - prometheus-data:/prometheus
+    networks:
+      - drpc
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - drpc
+
 volumes:
   kafka-data:
   localstack-data:
+  prometheus-data:
+  grafana-data:
 
 networks:
   drpc:
