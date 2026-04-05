@@ -7,15 +7,6 @@ terraform {
       version = "~> 5.0"
     }
   }
-
-  # Uncomment to use S3 remote state for real deployments:
-  # backend "s3" {
-  #   bucket         = "my-tf-state"
-  #   key            = "drpc-proxy/terraform.tfstate"
-  #   region         = "us-east-1"
-  #   dynamodb_table = "tf-state-lock"
-  #   encrypt        = true
-  # }
 }
 
 provider "aws" {
@@ -122,6 +113,7 @@ module "ecs" {
   worker_memory         = var.worker_memory
   worker_desired_count  = var.worker_desired_count
   worker_goroutines     = var.worker_goroutines
+  worker_mock           = var.worker_mock
   proxy_max_concurrent  = var.proxy_max_concurrent
   proxy_kafka_workers   = var.proxy_kafka_workers
   is_localstack         = local.is_localstack

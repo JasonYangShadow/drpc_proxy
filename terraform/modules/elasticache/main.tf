@@ -24,5 +24,5 @@ resource "aws_elasticache_replication_group" "main" {
 }
 
 locals {
-  primary_endpoint = var.is_localstack ? "localhost:6379" : "${aws_elasticache_replication_group.main[0].primary_endpoint_address}:6379"
+  primary_endpoint = var.is_localstack ? "redis:6379" : "${aws_elasticache_replication_group.main[0].primary_endpoint_address}:6379"
 }

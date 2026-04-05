@@ -34,13 +34,13 @@ resource "aws_subnet" "private" {
 # ── NAT Gateway ───────────────────────────────────────────────────────────────
 
 resource "aws_eip" "nat" {
-  count  = length(var.availability_zones)
+  count  = var.is_localstack ? 0 : length(var.availability_zones)
   domain = "vpc"
   tags   = { Name = "${var.name}-nat-eip-${count.index + 1}" }
 }
 
 resource "aws_nat_gateway" "main" {
-  count         = length(var.availability_zones)
+  count         = var.is_localstack ? 0 : length(var.availability_zones)
   allocation_id = aws_eip.nat[count.index].id
   subnet_id     = aws_subnet.public[count.index].id
   tags          = { Name = "${var.name}-nat-${count.index + 1}" }
@@ -69,9 +69,12 @@ resource "aws_route_table" "private" {
   count  = length(var.availability_zones)
   vpc_id = aws_vpc.main.id
 
-  route {
-    cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.main[count.index].id
+  dynamic "route" {
+    for_each = var.is_localstack ? [] : [1]
+    content {
+      cidr_block     = "0.0.0.0/0"
+      nat_gateway_id = aws_nat_gateway.main[count.index].id
+    }
   }
 
   tags = { Name = "${var.name}-rt-private-${count.index + 1}" }
@@ -93,13 +96,6 @@ resource "aws_security_group" "alb" {
   ingress {
     from_port   = 80
     to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    from_port   = 8545
-    to_port     = 8545
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }

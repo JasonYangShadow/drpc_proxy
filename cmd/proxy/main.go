@@ -30,8 +30,17 @@ func main() {
 		Short: "High-performance JSON-RPC proxy for Polygon Amoy",
 	}
 
-	rootCmd.PersistentFlags().StringVar(&kafkaAddr, "kafka", "kafka:9092", "Kafka broker address")
-	rootCmd.PersistentFlags().StringVar(&redisAddr, "redis", "redis:6379", "Redis address")
+	kafkaDefault := "kafka:9092"
+	if v := os.Getenv("KAFKA_ADDR"); v != "" {
+		kafkaDefault = v
+	}
+	redisDefault := "redis:6379"
+	if v := os.Getenv("REDIS_ADDR"); v != "" {
+		redisDefault = v
+	}
+
+	rootCmd.PersistentFlags().StringVar(&kafkaAddr, "kafka", kafkaDefault, "Kafka broker address")
+	rootCmd.PersistentFlags().StringVar(&redisAddr, "redis", redisDefault, "Redis address")
 
 	// proxy command
 	proxyCmd := &cobra.Command{

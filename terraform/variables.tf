@@ -65,7 +65,7 @@ variable "proxy_memory" {
 variable "proxy_desired_count" {
   description = "Number of proxy Fargate tasks to run."
   type        = number
-  default     = 2
+  default     = 3
 }
 
 variable "proxy_max_concurrent" {
@@ -97,13 +97,19 @@ variable "worker_memory" {
 variable "worker_desired_count" {
   description = "Number of worker Fargate tasks to run."
   type        = number
-  default     = 2
+  default     = 3
 }
 
 variable "worker_goroutines" {
   description = "Number of consumer goroutines per worker task."
   type        = number
   default     = 20
+}
+
+variable "worker_mock" {
+  description = "Run the worker in mock mode (no real upstream calls). Useful for load testing."
+  type        = bool
+  default     = false
 }
 
 # ── MSK (Kafka) ───────────────────────────────────────────────────────────────

@@ -92,6 +92,11 @@ variable "worker_goroutines" {
   default = 20
 }
 
+variable "worker_mock" {
+  type    = bool
+  default = false
+}
+
 variable "is_localstack" {
   type    = bool
   default = false

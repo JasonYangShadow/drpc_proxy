@@ -15,8 +15,8 @@ proxy_memory  = 512
 worker_cpu    = 512
 worker_memory = 1024
 
-proxy_desired_count  = 1
-worker_desired_count = 1
+proxy_desired_count  = 3
+worker_desired_count = 3
 
 # MSK/ElastiCache are not scheduled by LocalStack community;
 # these point to the docker-compose Kafka and Redis instead.

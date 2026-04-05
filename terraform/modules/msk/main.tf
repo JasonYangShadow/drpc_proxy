@@ -30,8 +30,8 @@ resource "aws_msk_cluster" "main" {
   number_of_broker_nodes = var.number_of_brokers
 
   broker_node_group_info {
-    instance_type  = var.instance_type
-    client_subnets = var.subnet_ids
+    instance_type   = var.instance_type
+    client_subnets  = var.subnet_ids
     security_groups = [var.security_group_id]
 
     storage_info {
@@ -64,5 +64,5 @@ resource "aws_msk_cluster" "main" {
 # On LocalStack MSK is not fully supported; we surface a placeholder so secrets
 # and ECS env vars are still populated consistently.
 locals {
-  bootstrap_brokers = var.is_localstack ? "localhost:9092" : aws_msk_cluster.main[0].bootstrap_brokers
+  bootstrap_brokers = var.is_localstack ? "kafka:9092" : aws_msk_cluster.main[0].bootstrap_brokers
 }

@@ -100,10 +100,10 @@ resource "aws_ecs_task_definition" "worker" {
     image     = var.worker_image
     essential = true
 
-    command = [
-      "run",
-      "--workers", tostring(var.worker_goroutines),
-    ]
+    command = concat(
+      ["run", "--workers", tostring(var.worker_goroutines)],
+      var.worker_mock ? ["--mock"] : []
+    )
 
     secrets = [
       { name = "KAFKA_ADDR", valueFrom = var.kafka_secret_arn },
