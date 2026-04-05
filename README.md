@@ -42,117 +42,22 @@ This completely decouples the ingest rate from the upstream processing rate, mak
 
 ### C1 — System Context
 
-```mermaid
-C4Context
-  title System Context — DRPC Proxy
+![](doc/Drawing%202026-04-05%2018.13.53.excalidraw.png)
 
-  Person(client, "Client", "dApp, wallet, or API consumer")
-
-  System_Boundary(sys, "DRPC Proxy System") {
-    System(proxy, "Proxy Cluster", "Accepts JSON-RPC requests, returns request_id immediately")
-    System(worker, "Worker Cluster", "Consumes from Kafka, calls upstream, stores result in Redis")
-  }
-
-  System_Ext(upstream, "Upstream RPC Node", "polygon-amoy.drpc.org — real blockchain node")
-
-  Rel(client, proxy, "POST /rpc", "HTTP — fire-and-forget")
-  Rel(client, proxy, "GET /result?request_id=...", "HTTP — poll for result")
-  Rel(worker, upstream, "JSON-RPC call", "HTTPS")
-
-  UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")
-```
+A mobile client (or any HTTP consumer) interacts with the **dRPC_Proxy** system via two operations: `POST /rpc` to submit a JSON-RPC request, and `GET /result` to retrieve the response. Inside the system boundary, multiple **Proxy Instances** receive inbound traffic and pass messages to multiple **Worker Instances**, which in turn call the **Upstream** blockchain RPC node. The client never waits for the upstream call — the proxy returns a `request_id` immediately and the client polls separately.
 
 ---
 
 ### C2 — Container Diagram
 
-```mermaid
-C4Container
-  title Container Diagram — DRPC Proxy (AWS / LocalStack)
+![](doc/Drawing%202026-04-05%2018.32.53.excalidraw.png)
 
-  Person(client, "Client", "dApp, wallet, or API consumer")
-  System_Ext(upstream, "Upstream RPC Node", "polygon-amoy.drpc.org")
+The system is split across two runtime environments:
 
-  System_Boundary(aws, "AWS / LocalStack") {
-    Container(alb, "ALB", "AWS elbv2", "Load balances HTTP traffic across proxy tasks (port 80 → 8545)")
+- **LocalStack** (orange boundary) simulates the AWS infrastructure locally. The **Load Balancer** (ALB) distributes incoming `POST/GET` traffic across multiple **Proxy Instances** (ECS Fargate tasks). A separate set of **Worker Instances** (ECS Fargate tasks) processes the queued requests and call the **Upstream** RPC node.
+- **Docker Compose** (purple boundary) hosts the supporting infrastructure. **Kafka** (multiple brokers, 3 partitions) acts as the durable message queue between proxy and workers. **Redis** serves as the shared state store for both sides.
 
-    System_Boundary(ecs, "ECS Cluster") {
-      Container(proxy, "Proxy Service", "Go HTTP · ×3 ECS tasks · 256 CPU / 512 MiB", "Accepts requests, writes pending status to Redis, enqueues to Kafka")
-      Container(worker, "Worker Service", "Go consumer · ×3 ECS tasks · 512 CPU / 1024 MiB", "Consumes from Kafka (1 partition each), calls upstream, writes result to Redis")
-    }
-
-    ContainerDb(kafka, "Apache Kafka", "KRaft, 3 partitions", "Durable request queue — topic: rpc_requests, DLQ: rpc_requests_dlq")
-    ContainerDb(redis, "Redis 7", "In-memory", "Result cache (TTL 10 min) + status store (TTL 5 min)")
-
-    Container(prom, "Prometheus", "Docker SD", "Scrapes metrics from all ECS containers")
-    Container(grafana, "Grafana", "Dashboard", "Request rate, Kafka lag, latency percentiles")
-  }
-
-  Rel(client, alb, "POST /rpc, GET /result", "HTTP")
-  Rel(alb, proxy, "Forwards requests", "HTTP")
-  Rel(proxy, redis, "Write pending / queued status", "go-redis")
-  Rel(proxy, kafka, "Publish message", "kafka-go")
-  Rel(worker, kafka, "Consume message", "kafka-go")
-  Rel(worker, upstream, "JSON-RPC call (3 retries)", "HTTPS")
-  Rel(worker, redis, "Write completed / failed result", "go-redis")
-  Rel(prom, proxy, "Scrape :2112/metrics", "HTTP")
-  Rel(prom, worker, "Scrape :2112/metrics", "HTTP")
-  Rel(grafana, prom, "Query", "PromQL")
-
-  UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="2")
-```
-
----
-
-### C3 — Component Diagram
-
-```mermaid
-C4Component
-  title Component Diagram — drpc-proxy (single task)
-
-  Person(client, "Client")
-  ContainerDb(redis, "Redis", "In-memory", "Status + result store")
-  Container(kafka_topic, "Kafka Topic", "rpc_requests", "3 partitions")
-
-  Container_Boundary(proxy, "drpc-proxy") {
-    Component(semaphore, "Semaphore", "Go channel", "Hard cap: 1,000 concurrent handlers")
-    Component(handler, "HTTP Handler", "net/http", "POST /rpc — validates body (max 128 KB), generates UUID, returns request_id in ~1-5ms\nGET /result — reads status/result from Redis")
-    Component(kafkaCh, "kafkaCh", "Go buffered channel", "Decouples HTTP handlers from Kafka writers (cap = 2,000)")
-    Component(producers, "Kafka Producer Workers", "×32 goroutines", "Drain kafkaCh, publish to Kafka (Snappy, batch 100), update Redis status to queued")
-  }
-
-  Rel(client, semaphore, "HTTP request")
-  Rel(semaphore, handler, "Acquired slot")
-  Rel(handler, redis, "SET status=pending")
-  Rel(handler, kafkaCh, "Push message")
-  Rel(producers, kafkaCh, "Read message")
-  Rel(producers, kafka_topic, "Publish")
-  Rel(producers, redis, "SET status=queued / failed")
-```
-
-```mermaid
-C4Component
-  title Component Diagram — drpc-worker (single task)
-
-  ContainerDb(redis, "Redis", "In-memory", "Status + result store")
-  Container(kafka_topic, "Kafka Topic", "rpc_requests", "1 partition assigned by consumer group")
-  Container(dlq, "Kafka DLQ", "rpc_requests_dlq", "Permanent failures")
-  System_Ext(upstream, "Upstream RPC Node", "polygon-amoy.drpc.org")
-
-  Container_Boundary(worker, "drpc-worker") {
-    Component(consumer, "Kafka Consumer", "kafka-go Reader", "ReadMessage loop — fetches one message at a time, pushes to jobCh")
-    Component(jobCh, "jobCh", "Go buffered channel", "Decouples reader from processor goroutines (cap = workers × 2)")
-    Component(pool, "Processing Goroutines", "×50 goroutines", "Call upstream RPC (3 retries, exp backoff, 3s timeout), commit offset after Redis write")
-  }
-
-  Rel(kafka_topic, consumer, "Consume")
-  Rel(consumer, jobCh, "Push job")
-  Rel(pool, jobCh, "Read job")
-  Rel(pool, upstream, "JSON-RPC call")
-  Rel(pool, redis, "SET status=completed, result=...")
-  Rel(pool, dlq, "Publish on permanent failure")
-  Rel(pool, redis, "SET status=failed")
-```
+The data flow is: Proxy → **Produce** to Kafka; Worker ← **Consume** from Kafka; Proxy ↔ Redis **Get/Set** (read status, write pending/queued); Worker → Redis **Set** (write completed result).
 
 ---
 
@@ -166,7 +71,7 @@ C4Component
 | **Semaphore on proxy** | Hard cap on concurrent HTTP handlers prevents runaway goroutine growth |
 | **Manual Kafka commit** | Offset only advances after Redis write succeeds — no silent result loss |
 | **DLQ on permanent failure** | Failed messages are preserved for inspection/replay rather than dropped |
-| **3 partitions ↔ 3 workers** | Each worker owns one partition; goroutines provide intra-partition parallelism |
+| **Mock mode on worker** | Workers can run with a configurable mock processor (tunable latency via `--mock-min-latency` / `--mock-max-latency`) that mimics upstream behaviour without real network calls, enabling reproducible load testing in the local environment |
 
 ---
 
@@ -174,27 +79,19 @@ C4Component
 
 ### Prerequisites
 
+This repository ships with a [Dev Container](https://containers.dev/) (`.devcontainer/`). Opening the project in **VS Code** with the [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) automatically provisions a fully configured development environment — Go, Terraform, Task, AWS CLI, and all other tooling are pre-installed inside the container.
+
+**The only things required on the host machine are:**
+
 | Tool | Purpose | Install |
 |---|---|---|
-| **Go 1.22+** | Build binaries | https://go.dev/dl |
-| **Docker + Docker Compose** | Run all infrastructure locally | https://docs.docker.com/get-docker |
-| **Task** | Task runner (`Taskfile.yml`) | `brew install go-task` / https://taskfile.dev |
-| **Terraform 1.5+** | Provision ECS / ALB / ECR on LocalStack | https://developer.hashicorp.com/terraform/install |
-| **AWS CLI v2** | Interact with LocalStack | https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html |
-| **LocalStack Pro** | AWS Fargate (ECS) emulator | Requires `LOCALSTACK_AUTH_TOKEN` env var |
+| **Docker Engine** | Runs the dev container; the Docker socket is mounted inside so all `docker` / `docker compose` commands run from within the container | https://docs.docker.com/get-docker |
+| **VS Code** | IDE with Dev Containers support | https://code.visualstudio.com |
+
+> You will also need a **LocalStack Pro auth token** (`LOCALSTACK_AUTH_TOKEN`) for ECS Fargate support. Add it to a `.env` file or export it in your shell before opening the dev container.
 
 > **Why LocalStack?**  
 > We use [LocalStack Pro](https://localstack.cloud) to simulate the full AWS deployment — ECS Fargate tasks, ECR image registry, ALB load balancer, CloudWatch Logs, Secrets Manager, and IAM — entirely on your laptop. The application code and Terraform configuration are identical between local and production; only the provider endpoint changes (`http://localstack:4566`).
-
----
-
-### Local Environment (LocalStack)
-
-**Export your LocalStack auth token** (required for ECS support):
-
-```bash
-export LOCALSTACK_AUTH_TOKEN=<your-token>
-```
 
 ---
 
@@ -232,7 +129,7 @@ task local:apply:mock
 
 Provisions ECS cluster, task definitions, services (3 proxy + 3 worker tasks), ALB, and security groups via Terraform. Workers run in **mock mode** — no real upstream calls, simulated 100–200ms latency.
 
-For real upstream calls (requires a valid `UPSTREAM_URL`):
+For real mode (workers forward all requests to the upstream RPC node at `polygon-amoy.drpc.org`):
 
 ```bash
 task local:apply
@@ -248,11 +145,25 @@ Starts Prometheus (port `9090`) and Grafana (port `3000`). Prometheus uses Docke
 
 #### Step 6 — Verify
 
+There are three ways to verify the stack:
+
+**Manual test** — sends a single `eth_blockNumber` request through the proxy and polls until the result is available:
+
 ```bash
 task test:manual
 ```
 
-Sends a single `eth_blockNumber` RPC request through the proxy and polls until the result is available.
+**End-to-end test** — runs automated e2e assertions covering the full request/result lifecycle:
+
+```bash
+task test:e2e
+```
+
+**Load test** — simulates 100 concurrent users sending requests continuously (see [§3 Load Test](#3-load-test) for details):
+
+```bash
+task test:load
+```
 
 #### Tear down
 
@@ -268,27 +179,69 @@ task docker:down
 ```
 .
 ├── cmd/
-│   ├── proxy/          # Proxy HTTP server entrypoint
-│   └── worker/         # Kafka consumer worker entrypoint
+│   ├── proxy/
+│   │   └── main.go                 # Proxy HTTP server entrypoint
+│   └── worker/
+│       └── main.go                 # Kafka consumer worker entrypoint
 ├── internal/
-│   ├── proxy/          # HTTP handler, Kafka producer workers, semaphore
-│   ├── worker/         # Message processor (real + mock)
-│   ├── kafka/          # Consumer (job dispatch, DLQ, commit)
-│   ├── redis/          # Result store
-│   └── const.go        # All tuneable constants
+│   ├── const.go                    # All tuneable constants
+│   ├── message.go                  # Shared message types
+│   ├── kafka/
+│   │   ├── consumer.go             # Kafka reader, job dispatch, DLQ, offset commit
+│   │   ├── consumer_test.go
+│   │   ├── producer.go             # Kafka writer (batched, Snappy)
+│   │   └── producer_test.go
+│   ├── metrics/
+│   │   └── metrics.go              # Prometheus metric definitions
+│   ├── proxy/
+│   │   ├── handler.go              # HTTP handler, semaphore, kafkaCh
+│   │   └── handler_test.go
+│   ├── redis/
+│   │   ├── store.go                # Result store (Get/Set with TTL)
+│   │   └── store_test.go
+│   └── worker/
+│       ├── handler.go              # Real upstream processor
+│       ├── handler_test.go
+│       ├── mock_handler.go         # Mock processor (configurable latency)
+│       └── mock_handler_test.go
 ├── terraform/
-│   ├── modules/
-│   │   ├── ecs/        # ECS cluster, task definitions, services
-│   │   └── networking/ # VPC, subnets, ALB
+│   ├── main.tf
+│   ├── variables.tf
+│   ├── outputs.tf
+│   ├── locals.tf
 │   ├── localstack.tfvars
-│   └── main.tf
+│   └── modules/
+│       ├── ecr/                    # ECR image registry
+│       ├── ecs/                    # ECS cluster, task definitions, services, ALB
+│       ├── elasticache/            # Redis (ElastiCache)
+│       ├── iam/                    # Task execution roles
+│       ├── msk/                    # Kafka (MSK)
+│       ├── networking/             # VPC, subnets, security groups
+│       └── secrets/                # Secrets Manager entries
 ├── tests/
-│   ├── e2e/            # End-to-end tests
-│   └── load/           # Continuous load test (see §3)
+│   ├── e2e/
+│   │   └── e2e_test.go             # End-to-end request/result lifecycle tests
+│   └── load/
+│       └── load_test.go            # Continuous load test (build tag: load)
 ├── deploy/
-│   └── grafana/        # Prometheus config, Grafana dashboard JSON
+│   ├── ecs/
+│   │   ├── task-proxy.json         # ECS task definition (proxy)
+│   │   └── task-worker.json        # ECS task definition (worker)
+│   ├── grafana/
+│   │   └── provisioning/
+│   │       ├── dashboards/         # Grafana dashboard JSON + config
+│   │       └── datasources/        # Prometheus datasource config
+│   ├── localstack/
+│   │   └── bootstrap.sh            # LocalStack init script
+│   └── prometheus.yml              # Prometheus scrape config (Docker SD)
+├── doc/                            # Architecture diagrams
+├── .devcontainer/                  # Dev container definition (Dockerfile, post-create hooks)
+├── Dockerfile.proxy
+├── Dockerfile.worker
 ├── docker-compose.yml
-└── Taskfile.yml
+├── Taskfile.yml
+├── go.mod
+└── go.sum
 ```
 
 ---
@@ -304,11 +257,14 @@ The load test (`tests/load/load_test.go`, build tag `load`) simulates **real use
 - Requests rotate through 5 Ethereum JSON-RPC methods: `eth_blockNumber`, `eth_gasPrice`, `eth_chainId`, `eth_getBlockByNumber`, `net_version`.
 - The test is **fire-and-forget** — it measures the proxy ingest path only (POST `/rpc` round-trip latency), not end-to-end result latency. This reflects the actual client experience: the proxy accepts immediately and the client polls separately.
 - Every **10 seconds** a stats window is printed: total sent, ok/err counts, instant req/s, cumulative avg req/s, and a latency histogram (p50/p90/p95/p99/max).
+- **Failures are expected and tracked.** A non-2xx response (e.g. when the proxy's semaphore is saturated, the `kafkaCh` buffer is full, or Kafka is temporarily unavailable) is counted as an error and reported in the stats. The error rate is a useful signal: a low rate indicates the system is handling load gracefully, while a rising error rate indicates back-pressure or a bottleneck that needs investigation.
 
 ```mermaid
 sequenceDiagram
   participant U as User goroutine (×100)
   participant P as Proxy POST /rpc
+  participant KCh as kafkaCh (buffer)
+  participant KW as Kafka Worker (×32)
   participant K as Kafka
   participant W as Worker goroutines (×50×3)
   participant R as Redis
@@ -316,10 +272,14 @@ sequenceDiagram
   loop every ~100ms per user (avg)
     U->>P: POST /rpc {method, params}
     P->>R: SET request_id → pending
-    P->>K: publish message
-    P-->>U: {request_id} ~1-5ms
+    P->>KCh: push message
+    P-->>U: {request_id, status:"accepted"} ~1-5ms
     Note over U: sleep rand(0, GAP)
   end
+
+  KW->>KCh: drain message
+  KW->>K: publish to topic
+  KW->>R: SET request_id → queued
 
   K->>W: consume message
   W->>W: call upstream RPC
@@ -371,6 +331,8 @@ $$\text{max msg/s} = \frac{\text{worker tasks} \times \text{goroutines per task}
 
 > **Kafka partitions = ceiling on worker tasks.** The topic has 3 partitions; adding a 4th worker container gains nothing. To scale beyond ~1,000 msg/s with 150ms latency, increase partitions and `worker_desired_count` together.
 
+> **The numbers above reflect the current default configuration, not a design ceiling.** Throughput scales linearly with the number of worker tasks, goroutines per task, and Kafka partitions — all of which are runtime variables (`worker_desired_count`, `worker_goroutines`, partition count). The load test itself is equally unconstrained: increasing `USERS` or decreasing `GAP` can drive far higher ingest rates. The capacity formula above gives the relationship — tune instances and settings to match your target QPS.
+
 **Default load test vs capacity:**
 
 | Parameter | Value |
@@ -390,3 +352,11 @@ $$\text{max msg/s} = \frac{\text{worker tasks} \times \text{goroutines per task}
 | p99 | < 30ms |
 
 The proxy itself is not the bottleneck. The semaphore (1,000 slots) and the `kafkaCh` buffer (2,000 slots per instance × 3 instances = 6,000 total) provide headroom for burst traffic well beyond the worker consumption rate, with Kafka acting as the durable overflow buffer.
+
+![](doc/Screenshot_20260405_190602.png)
+
+---
+
+## 4. Demo
+
+https://github.com/JasonYangShadow/drpc_proxy/raw/main/doc/2026-04-05%2019-01-19_compressed.mp4
