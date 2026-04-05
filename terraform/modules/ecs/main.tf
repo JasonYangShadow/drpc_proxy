@@ -1,8 +1,7 @@
 # ── Cluster ───────────────────────────────────────────────────────────────────
 
 resource "aws_ecs_cluster" "main" {
-  count = var.is_localstack ? 0 : 1
-  name  = var.name
+  name = var.name
 
   setting {
     name  = "containerInsights"
@@ -29,7 +28,6 @@ resource "aws_cloudwatch_log_group" "worker" {
 # ── Task Definitions ──────────────────────────────────────────────────────────
 
 resource "aws_ecs_task_definition" "proxy" {
-  count                    = var.is_localstack ? 0 : 1
   family                   = "${var.name}-proxy"
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
@@ -50,6 +48,7 @@ resource "aws_ecs_task_definition" "proxy" {
     }]
 
     command = [
+      "proxy",
       "--port", "8545",
       "--max-concurrent", tostring(var.proxy_max_concurrent),
       "--kafka-workers", tostring(var.proxy_kafka_workers),
@@ -88,7 +87,6 @@ resource "aws_ecs_task_definition" "proxy" {
 }
 
 resource "aws_ecs_task_definition" "worker" {
-  count                    = var.is_localstack ? 0 : 1
   family                   = "${var.name}-worker"
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
@@ -103,7 +101,8 @@ resource "aws_ecs_task_definition" "worker" {
     essential = true
 
     command = [
-      "--goroutines", tostring(var.worker_goroutines),
+      "run",
+      "--workers", tostring(var.worker_goroutines),
     ]
 
     secrets = [
@@ -133,10 +132,9 @@ resource "aws_ecs_task_definition" "worker" {
 # ── Services ──────────────────────────────────────────────────────────────────
 
 resource "aws_ecs_service" "proxy" {
-  count           = var.is_localstack ? 0 : 1
   name            = "${var.name}-proxy"
-  cluster         = aws_ecs_cluster.main[0].id
-  task_definition = aws_ecs_task_definition.proxy[0].arn
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.proxy.arn
   desired_count   = var.proxy_desired_count
   launch_type     = "FARGATE"
 
@@ -162,10 +160,9 @@ resource "aws_ecs_service" "proxy" {
 }
 
 resource "aws_ecs_service" "worker" {
-  count           = var.is_localstack ? 0 : 1
   name            = "${var.name}-worker"
-  cluster         = aws_ecs_cluster.main[0].id
-  task_definition = aws_ecs_task_definition.worker[0].arn
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.worker.arn
   desired_count   = var.worker_desired_count
   launch_type     = "FARGATE"
 

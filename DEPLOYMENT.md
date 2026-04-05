@@ -145,16 +145,25 @@ http://localhost:8545/result/<uuid>
 
 ## Infrastructure with LocalStack
 
-LocalStack simulates a subset of AWS services locally. The
-Community edition (used here) supports **IAM**, **Secrets Manager**,
-**CloudWatch Logs**, **STS**, and **S3**. VPC, ECR, and ECS are Pro-only and
-are automatically skipped by the Terraform modules when
-`is_localstack = true`.
+[LocalStack Pro](https://localstack.cloud) simulates the full AWS stack locally, including **VPC**, **ECR**, **ECS Fargate**, **ALB (ELBv2)**, **IAM**, **Secrets Manager**, and **CloudWatch Logs**. A valid Pro licence is required — the free Community edition does not support ECR, ECS, or ELBv2.
+
+### Prerequisites
+
+1. **LocalStack Pro licence.** Sign up at <https://app.localstack.cloud> and start a trial or purchase a subscription.
+
+2. **Auth token.** Copy `.env.example` to `.env` and fill in your token:
+
+   ```bash
+   cp .env.example .env
+   # edit .env — set LOCALSTACK_AUTH_TOKEN=<your token from app.localstack.cloud>
+   ```
+
+   `.env` is gitignored and never committed. Docker Compose reads it automatically.
 
 ### First-time setup
 
 ```bash
-# 1. Start infrastructure containers (if not already running)
+# 1. Start Kafka, Redis, and LocalStack Pro
 task dev:up:infra
 
 # 2. Download Terraform providers (run once, or after upgrading providers)
@@ -164,16 +173,78 @@ task infra:init
 task infra:local
 ```
 
-`infra:local` runs `terraform apply -var-file=localstack.tfvars -auto-approve` and creates:
-- IAM execution roles for proxy and worker
-- Secrets Manager entries (`drpc/kafka-addr`, `drpc/redis-addr`, `drpc/upstream-url`)
-- CloudWatch log groups (`/ecs/drpc-proxy`, `/ecs/drpc-worker`)
+`infra:local` runs `terraform apply -var-file=localstack.tfvars -auto-approve` and creates the full resource graph (~40 resources):
+
+| Module | Resources |
+|--------|-----------|
+| networking | VPC, subnets, IGW, NAT gateway, route tables, security groups, ALB, target group, listener |
+| ecr | `drpc-local-proxy` and `drpc-local-worker` repositories + lifecycle policies |
+| ecs | ECS cluster, task definitions (proxy + worker), services (1 task each), CloudWatch log groups |
+| iam | ECS execution role + task role with policies |
+| secrets | Secrets Manager entries for `kafka-url` and `redis-url` |
+
+### Push images and start ECS tasks
+
+After `infra:local` succeeds, build and push the application images to LocalStack ECR:
+
+```bash
+task infra:push:local
+```
+
+This authenticates against the LocalStack ECR endpoint, builds both images from source, and pushes them tagged `latest`. LocalStack Pro will then pull the images and launch the ECS tasks as real Docker containers on your machine.
+
+To push a specific tag:
+
+```bash
+task infra:push:local IMAGE_TAG=v1.2.3
+```
 
 ### Verify
 
+Check that ECS services are running via the AWS CLI (pointed at LocalStack):
+
 ```bash
-task dev:status
+AWS_PAGER="" aws --endpoint-url=http://localstack:4566 \
+  ecs describe-services \
+  --cluster drpc-local \
+  --services drpc-local-proxy drpc-local-worker \
+  --output text --query 'services[*].[serviceName,runningCount,desiredCount]'
 ```
+
+LocalStack ECS runs tasks as real Docker containers prefixed `ls-ecs-drpc-local-*`. You can verify this with:
+
+```bash
+docker ps --format "{{.Names}}\t{{.Status}}" | grep ls-ecs
+```
+
+### Test the ECS-deployed service
+
+Get the proxy container's IP (it joins the `drpc_proxy_drpc` bridge network):
+
+```bash
+PROXY_IP=$(docker inspect \
+  $(docker ps --format "{{.Names}}" | grep "ls-ecs.*proxy") \
+  --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+
+# Health check
+curl -s http://$PROXY_IP:8545/health
+# → {"status":"ok"}
+
+# Submit a JSON-RPC call
+RESP=$(curl -s -X POST http://$PROXY_IP:8545/rpc \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}')
+echo $RESP
+# → {"status":"accepted","request_id":"<uuid>","updated_at":0}
+
+REQUEST_ID=$(echo $RESP | python3 -c "import sys,json; print(json.load(sys.stdin)['request_id'])")
+
+# Poll for the result (worker processes it asynchronously)
+curl -sL "http://$PROXY_IP:8545/result/?request_id=$REQUEST_ID"
+# → {"status":"completed","result":{"jsonrpc":"2.0","result":"0x...","id":1},...}
+```
+
+The **ALB DNS name** (`drpc-local-alb.elb.localhost.localstack.cloud`) is also provisioned and routes to the proxy, matching the production topology.
 
 ### Tear down
 
@@ -284,3 +355,4 @@ The compose file exposes these ports to the Docker host, so you can reach servic
 | kafka | 9092 |
 | redis | 6379 |
 | localstack | 4566 |
+| localstack ECS task ports | 4510–4560 |

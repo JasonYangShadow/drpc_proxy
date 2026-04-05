@@ -102,6 +102,10 @@ tasks:
     desc: "Build images and push to ECR (real AWS). Optionally: task infra:push IMAGE_TAG=v1.2.3"
     deps: [_tf:push]
 
+  infra:push:local:
+    desc: "Build images and push to LocalStack ECR. Optionally: task infra:push:local IMAGE_TAG=v1.2.3"
+    deps: [_tf:push:local]
+
   # ============================================================
   # INTERNAL — hidden from `task --list`
   # ============================================================
@@ -226,6 +230,25 @@ tasks:
         sh: terraform output -raw aws_region 2>/dev/null || echo "us-east-1"
     cmds:
       - aws ecr get-login-password --region {{.REGION}} | docker login --username AWS --password-stdin {{.PROXY_URL}}
+      - docker build -f ../Dockerfile.proxy -t {{.PROXY_URL}}:{{.IMAGE_TAG | default "latest"}} ..
+      - docker push {{.PROXY_URL}}:{{.IMAGE_TAG | default "latest"}}
+      - docker build -f ../Dockerfile.worker -t {{.WORKER_URL}}:{{.IMAGE_TAG | default "latest"}} ..
+      - docker push {{.WORKER_URL}}:{{.IMAGE_TAG | default "latest"}}
+
+  _tf:push:local:
+    internal: true
+    dir: terraform
+    env:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+    vars:
+      PROXY_URL:
+        sh: terraform output -raw proxy_ecr_repository_url
+      WORKER_URL:
+        sh: terraform output -raw worker_ecr_repository_url
+    cmds:
+      - aws --endpoint-url=http://localstack:4566 ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin {{.PROXY_URL}}
       - docker build -f ../Dockerfile.proxy -t {{.PROXY_URL}}:{{.IMAGE_TAG | default "latest"}} ..
       - docker push {{.PROXY_URL}}:{{.IMAGE_TAG | default "latest"}}
       - docker build -f ../Dockerfile.worker -t {{.WORKER_URL}}:{{.IMAGE_TAG | default "latest"}} ..

@@ -1,15 +1,15 @@
 output "cluster_name" {
-  value = var.is_localstack ? var.name : aws_ecs_cluster.main[0].name
+  value = aws_ecs_cluster.main.name
 }
 
 output "cluster_arn" {
-  value = var.is_localstack ? "" : aws_ecs_cluster.main[0].arn
+  value = aws_ecs_cluster.main.arn
 }
 
 output "proxy_service_name" {
-  value = var.is_localstack ? "" : aws_ecs_service.proxy[0].name
+  value = aws_ecs_service.proxy.name
 }
 
 output "worker_service_name" {
-  value = var.is_localstack ? "" : aws_ecs_service.worker[0].name
+  value = aws_ecs_service.worker.name
 }

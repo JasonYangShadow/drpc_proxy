@@ -24,16 +24,17 @@ services:
   # ── Infrastructure ──────────────────────────────────────────────────────────
 
   localstack:
-    image: localstack/localstack:3
+    image: localstack/localstack-pro:latest
     container_name: localstack
     ports:
       - "4566:4566"
+      - "4510-4560:4510-4560"   # ECS task port range
     environment:
-      - SERVICES=ecs,ecr,logs,secretsmanager,iam
+      - LOCALSTACK_AUTH_TOKEN=${LOCALSTACK_AUTH_TOKEN}
+      - SERVICES=ecs,ecr,logs,secretsmanager,iam,ec2,elbv2
       - AWS_DEFAULT_REGION=us-east-1
-      # Mount Docker socket so LocalStack Pro can run actual Fargate tasks.
-      # On Community edition tasks are registered but not scheduled.
       - DOCKER_HOST=unix:///var/run/docker.sock
+      - ECS_DOCKER_FLAGS=--network drpc_proxy_drpc   # run ECS tasks on our network
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock"
       - localstack-data:/var/lib/localstack
