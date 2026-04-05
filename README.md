@@ -355,8 +355,4 @@ The proxy itself is not the bottleneck. The semaphore (1,000 slots) and the `kaf
 
 ![](doc/Screenshot_20260405_190602.png)
 
----
-
-## 4. Demo
-
-<video src="doc/2026-04-05 19-01-19_compressed.webm" controls width="100%"></video>
+[![](doc/Screenshot_20260405_190602.png)](doc/2026-04-05 19-01-19_compressed.webm)
