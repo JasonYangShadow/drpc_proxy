@@ -3,9 +3,12 @@
 resource "aws_ecs_cluster" "main" {
   name = var.name
 
-  setting {
-    name  = "containerInsights"
-    value = "enabled"
+  dynamic "setting" {
+    for_each = var.is_localstack ? [] : [1]
+    content {
+      name  = "containerInsights"
+      value = "enabled"
+    }
   }
 
   tags = { Name = var.name }
@@ -102,7 +105,7 @@ resource "aws_ecs_task_definition" "worker" {
 
     command = concat(
       ["run", "--workers", tostring(var.worker_goroutines)],
-      var.worker_mock ? ["--mock"] : []
+      var.worker_mock ? ["--mock", "--mock-min-latency", var.worker_mock_min_latency, "--mock-max-latency", var.worker_mock_max_latency] : []
     )
 
     secrets = [

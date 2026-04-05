@@ -33,6 +33,7 @@ provider "aws" {
   skip_credentials_validation = var.localstack_endpoint != ""
   skip_requesting_account_id  = var.localstack_endpoint != ""
   skip_metadata_api_check     = var.localstack_endpoint != ""
+  skip_region_validation      = var.localstack_endpoint != ""
   access_key                  = var.localstack_endpoint != "" ? "test" : null
   secret_key                  = var.localstack_endpoint != "" ? "test" : null
 }
@@ -94,27 +95,29 @@ module "elasticache" {
 module "ecs" {
   source = "./modules/ecs"
 
-  name                  = local.name
-  aws_region            = var.aws_region
-  vpc_id                = module.networking.vpc_id
-  private_subnet_ids    = module.networking.private_subnet_ids
-  alb_target_group_arn  = module.networking.alb_target_group_arn
-  ecs_security_group_id = module.networking.ecs_security_group_id
-  execution_role_arn    = module.iam.execution_role_arn
-  task_role_arn         = module.iam.task_role_arn
-  proxy_image           = "${module.ecr.proxy_repository_url}:${var.image_tag}"
-  worker_image          = "${module.ecr.worker_repository_url}:${var.image_tag}"
-  kafka_secret_arn      = module.secrets.kafka_secret_arn
-  redis_secret_arn      = module.secrets.redis_secret_arn
-  proxy_cpu             = var.proxy_cpu
-  proxy_memory          = var.proxy_memory
-  proxy_desired_count   = var.proxy_desired_count
-  worker_cpu            = var.worker_cpu
-  worker_memory         = var.worker_memory
-  worker_desired_count  = var.worker_desired_count
-  worker_goroutines     = var.worker_goroutines
-  worker_mock           = var.worker_mock
-  proxy_max_concurrent  = var.proxy_max_concurrent
-  proxy_kafka_workers   = var.proxy_kafka_workers
-  is_localstack         = local.is_localstack
+  name                    = local.name
+  aws_region              = var.aws_region
+  vpc_id                  = module.networking.vpc_id
+  private_subnet_ids      = module.networking.private_subnet_ids
+  alb_target_group_arn    = module.networking.alb_target_group_arn
+  ecs_security_group_id   = module.networking.ecs_security_group_id
+  execution_role_arn      = module.iam.execution_role_arn
+  task_role_arn           = module.iam.task_role_arn
+  proxy_image             = "${module.ecr.proxy_repository_url}:${var.image_tag}"
+  worker_image            = "${module.ecr.worker_repository_url}:${var.image_tag}"
+  kafka_secret_arn        = module.secrets.kafka_secret_arn
+  redis_secret_arn        = module.secrets.redis_secret_arn
+  proxy_cpu               = var.proxy_cpu
+  proxy_memory            = var.proxy_memory
+  proxy_desired_count     = var.proxy_desired_count
+  worker_cpu              = var.worker_cpu
+  worker_memory           = var.worker_memory
+  worker_desired_count    = var.worker_desired_count
+  worker_goroutines       = var.worker_goroutines
+  worker_mock             = var.worker_mock
+  worker_mock_min_latency = var.worker_mock_min_latency
+  worker_mock_max_latency = var.worker_mock_max_latency
+  proxy_max_concurrent    = var.proxy_max_concurrent
+  proxy_kafka_workers     = var.proxy_kafka_workers
+  is_localstack           = local.is_localstack
 }

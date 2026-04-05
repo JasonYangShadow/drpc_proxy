@@ -16,14 +16,33 @@ tasks:
   docker:down:
     desc: "Stop and remove all local stack containers"
     cmds:
+      # Remove LocalStack-spawned ECS containers first — they stay attached to the
+      # drpc_proxy_drpc network and prevent docker compose down from removing it.
+      - |
+        LEFTOVER=$(docker ps -aq --filter "name=ls-ecs-drpc-local-" 2>/dev/null)
+        if [ -n "$LEFTOVER" ]; then
+          docker rm -f $LEFTOVER >/dev/null 2>&1 || true
+        fi
+      # Disconnect this devcontainer from the shared network so compose can remove it.
+      - |
+        NETWORK=drpc_proxy_drpc
+        SELF=$(docker network inspect "$NETWORK" --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null \
+          | tr ' ' '\n' | grep -v '^$' | grep -v '^ls-ecs' || true)
+        for C in $SELF; do
+          docker network disconnect "$NETWORK" "$C" 2>/dev/null || true
+        done
       - docker compose down
+      # Note: the drpc_proxy_drpc network may linger with a "still in use" warning
+      # because the devcontainer itself is attached. This is harmless — compose
+      # reuses the existing network on the next docker:up.
 
   monitoring:up:
     desc: "Start Prometheus (port 9090) and Grafana (port 3000)"
     cmds:
-      - docker compose up -d prometheus grafana
+      - docker compose up -d prometheus-config-init prometheus grafana
       - echo "Prometheus → http://localhost:9090"
       - echo "Grafana    → http://localhost:3000"
+      - bash deploy/grafana/setup-grafana.sh
 
   monitoring:down:
     desc: "Stop Prometheus and Grafana"
@@ -123,6 +142,38 @@ tasks:
         fi
         echo "Running e2e tests against $ADDR"
         PROXY_ADDR="$ADDR" go test {{.GO_FLAGS}} -v -tags e2e -timeout 120s ./tests/e2e/
+
+  test:load:
+    desc: "Load test — simulate N users each sending continuously with random gap (Ctrl+C to stop)"
+    vars:
+      USERS: '{{.USERS | default "100"}}'
+      GAP: '{{.GAP | default "200ms"}}'
+      DURATION: '{{.DURATION | default "0"}}'
+    cmds:
+      - |
+        if [ -n "$PROXY_ADDR" ]; then
+          ADDR="$PROXY_ADDR"
+        else
+          # Try LocalStack ALB first, fall back to a single proxy container IP
+          ALB_DNS="drpc-local-alb.elb.localhost.localstack.cloud"
+          if curl -sf --max-time 2 "http://$ALB_DNS/health" >/dev/null 2>&1; then
+            ADDR="http://$ALB_DNS"
+            echo "Using LocalStack ALB at $ADDR"
+          else
+            IDS=$(docker ps -q)
+            PROXY_IP=$(docker inspect $IDS 2>/dev/null | python3 -c "import sys,json; cs=json.load(sys.stdin); r=[list(c.get('NetworkSettings',{}).get('Networks',{}).values())[0]['IPAddress'] for c in cs if 'drpc-local-proxy' in c.get('Config',{}).get('Image','') and c.get('NetworkSettings',{}).get('Networks',{})]; print(r[0] if r else '')")
+            [ -z "$PROXY_IP" ] && echo "No proxy container found — run task local:push first" && exit 1
+            ADDR="http://$PROXY_IP:8545"
+            echo "ALB not reachable, using single proxy at $ADDR (run task local:apply to set up the ALB)"
+          fi
+        fi
+        DUR_FLAG=""
+        [ "{{.DURATION}}" != "0" ] && DUR_FLAG="-duration {{.DURATION}}"
+        echo "Load test → $ADDR  users={{.USERS}}  gap={{.GAP}}  duration={{.DURATION}}"
+        PROXY_ADDR="$ADDR" go test -v -tags load -timeout 0 ./tests/load/ \
+          -users {{.USERS}} \
+          -gap {{.GAP}} \
+          $DUR_FLAG
 
   test:manual:
     desc: "Send a single eth_blockNumber RPC request and poll until result (auto-detects proxy IP)"

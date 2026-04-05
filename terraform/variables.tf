@@ -112,6 +112,18 @@ variable "worker_mock" {
   default     = false
 }
 
+variable "worker_mock_min_latency" {
+  description = "Mock processor minimum simulated latency (e.g. 10ms, 0ms)."
+  type        = string
+  default     = "10ms"
+}
+
+variable "worker_mock_max_latency" {
+  description = "Mock processor maximum simulated latency (e.g. 50ms)."
+  type        = string
+  default     = "50ms"
+}
+
 # ── MSK (Kafka) ───────────────────────────────────────────────────────────────
 
 variable "kafka_version" {

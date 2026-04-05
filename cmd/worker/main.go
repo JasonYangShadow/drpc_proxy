@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
@@ -17,12 +18,14 @@ import (
 )
 
 var (
-	kafkaAddr   string
-	redisAddr   string
-	groupID     string
-	workers     int
-	useMock     bool
-	metricsPort string
+	kafkaAddr      string
+	redisAddr      string
+	groupID        string
+	workers        int
+	useMock        bool
+	metricsPort    string
+	mockMinLatency time.Duration
+	mockMaxLatency time.Duration
 )
 
 func main() {
@@ -53,6 +56,8 @@ func main() {
 	workerCmd.Flags().IntVar(&workers, "workers", 20, "Number of worker goroutines")
 	workerCmd.Flags().BoolVar(&useMock, "mock", false, "Use mock processor (no real upstream calls, for load/mock testing)")
 	workerCmd.Flags().StringVar(&metricsPort, "metrics-port", "2112", "Port to expose Prometheus /metrics endpoint")
+	workerCmd.Flags().DurationVar(&mockMinLatency, "mock-min-latency", 100*time.Millisecond, "Mock processor minimum simulated latency")
+	workerCmd.Flags().DurationVar(&mockMaxLatency, "mock-max-latency", 200*time.Millisecond, "Mock processor maximum simulated latency")
 
 	rootCmd.AddCommand(workerCmd)
 
@@ -69,8 +74,11 @@ func runWorker(cmd *cobra.Command, args []string) {
 
 	var handler worker.MessageHandler
 	if useMock {
-		log.Println("Mock mode: using MockProcessor (no real upstream calls)")
-		handler = worker.NewMockProcessor()
+		log.Printf("Mock mode: using MockProcessor (min-latency=%s max-latency=%s)", mockMinLatency, mockMaxLatency)
+		m := worker.NewMockProcessor()
+		m.MinLatency = mockMinLatency
+		m.MaxLatency = mockMaxLatency
+		handler = m
 	} else {
 		handler = worker.NewProcessor()
 	}

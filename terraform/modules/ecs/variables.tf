@@ -97,6 +97,16 @@ variable "worker_mock" {
   default = false
 }
 
+variable "worker_mock_min_latency" {
+  type    = string
+  default = "10ms"
+}
+
+variable "worker_mock_max_latency" {
+  type    = string
+  default = "50ms"
+}
+
 variable "is_localstack" {
   type    = bool
   default = false

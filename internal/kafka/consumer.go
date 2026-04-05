@@ -184,7 +184,6 @@ func (c *Consumer) saveResponse(msg kafka.Message, respBody []byte, err error) e
 		return fmt.Errorf("failed to save to Redis: %w", saveErr)
 	}
 
-	log.Printf("Response saved to Redis: request_id=%s status=%s", msg.Key, resp.Status)
 	return nil
 }
 
