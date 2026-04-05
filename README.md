@@ -353,6 +353,4 @@ $$\text{max msg/s} = \frac{\text{worker tasks} \times \text{goroutines per task}
 
 The proxy itself is not the bottleneck. The semaphore (1,000 slots) and the `kafkaCh` buffer (2,000 slots per instance × 3 instances = 6,000 total) provide headroom for burst traffic well beyond the worker consumption rate, with Kafka acting as the durable overflow buffer.
 
-![](doc/Screenshot_20260405_190602.png)
-
-[![](doc/Screenshot_20260405_190602.png)](doc/2026-04-05 19-01-19_compressed.webm)
+[![](doc/Screenshot_20260405_190602.png)](doc/loadtest.webm)
