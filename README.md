@@ -359,4 +359,4 @@ The proxy itself is not the bottleneck. The semaphore (1,000 slots) and the `kaf
 
 ## 4. Demo
 
-https://github.com/JasonYangShadow/drpc_proxy/raw/main/doc/2026-04-05%2019-01-19_compressed.mp4
+<video src="doc/2026-04-05%2019-01-19_compressed.mp4" controls width="100%"></video>
