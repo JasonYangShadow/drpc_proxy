@@ -84,11 +84,15 @@ func runWorker(cmd *cobra.Command, args []string) {
 	}
 
 	// Start Prometheus metrics server
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	metricsSrv := &http.Server{
+		Addr:    ":" + metricsPort,
+		Handler: mux,
+	}
 	go func() {
-		mux := http.NewServeMux()
-		mux.Handle("/metrics", promhttp.Handler())
 		log.Printf("Metrics server listening on :%s", metricsPort)
-		if err := http.ListenAndServe(":"+metricsPort, mux); err != nil {
+		if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("Metrics server error: %v", err)
 		}
 	}()
@@ -111,6 +115,11 @@ func runWorker(cmd *cobra.Command, args []string) {
 	// Create shutdown context with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), internal.ShutdownTimeout)
 	defer cancel()
+
+	// Shut down metrics server so it stops accepting scrape requests
+	if err := metricsSrv.Shutdown(ctx); err != nil {
+		log.Printf("Metrics server shutdown error: %v", err)
+	}
 
 	// Close Kafka consumer first — drains in-flight workers before cancelling processor
 	if err := consumer.Close(ctx); err != nil {
