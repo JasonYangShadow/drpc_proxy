@@ -13,7 +13,6 @@ A high-throughput, async JSON-RPC proxy built in Go that decouples HTTP clients 
    - [Key Design Decisions](#key-design-decisions)
 2. [Setup](#2-setup)
    - [Prerequisites](#prerequisites)
-   - [Local Environment (LocalStack)](#local-environment-localstack)
    - [Running the Full Stack](#running-the-full-stack)
 3. [Load Test](#3-load-test)
    - [Load Test](#load-test)
