@@ -82,8 +82,8 @@ This repository ships with a [Dev Container](https://containers.dev/) (`.devcont
 
 | Tool | Purpose | Install |
 |---|---|---|
-| **Docker Engine** | Runs the dev container; the Docker socket is mounted inside so all `docker` / `docker compose` commands run from within the container | https://docs.docker.com/get-docker |
-| **VS Code** | IDE with Dev Containers support | https://code.visualstudio.com |
+| **Docker Engine** | Runs the dev container; the Docker socket is mounted inside so all `docker` / `docker compose` commands run from within the container | <https://docs.docker.com/get-docker> |
+| **VS Code** | IDE with Dev Containers support | <https://code.visualstudio.com> |
 
 > You will also need a **LocalStack Pro auth token** (`LOCALSTACK_AUTH_TOKEN`) for ECS Fargate support. Add it to a `.env` file or export it in your shell before opening the dev container.
 
@@ -222,8 +222,7 @@ task docker:down
 │       └── load_test.go            # Continuous load test (build tag: load)
 ├── deploy/
 │   ├── ecs/
-│   │   ├── task-proxy.json         # ECS task definition (proxy)
-│   │   └── task-worker.json        # ECS task definition (worker)
+│   │   # ECS task definitions (proxy/worker) are now managed by Terraform or omitted
 │   ├── grafana/
 │   │   └── provisioning/
 │   │       ├── dashboards/         # Grafana dashboard JSON + config
