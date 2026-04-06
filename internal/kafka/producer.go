@@ -3,28 +3,36 @@ package kafka
 import (
 	"context"
 
+	"drpc_proxy.com/internal"
 	"github.com/segmentio/kafka-go"
 )
 
+// kafkaWriter is the subset of *kafka.Writer used by Producer.
+type kafkaWriter interface {
+	WriteMessages(ctx context.Context, msgs ...kafka.Message) error
+	Close() error
+}
+
 type Producer struct {
-	writer *kafka.Writer
+	writer kafkaWriter
 }
 
 func NewProducer(broker string) (*Producer, error) {
 	w := &kafka.Writer{
-		Addr:     kafka.TCP(broker),
-		Topic:    "rpc_requests",
-		Balancer: &kafka.Hash{},
-		Async:    false, // Set to true for fire-and-forget
+		Addr:         kafka.TCP(broker),
+		Topic:        internal.KafkaTopic,
+		Balancer:     &kafka.Hash{},
+		Async:        false,
+		BatchSize:    internal.KafkaProducerBatchSize,
+		BatchTimeout: internal.KafkaProducerBatchTimeout,
+		Compression:  kafka.Snappy,
+		RequiredAcks: kafka.RequireOne,
+		MaxAttempts:  internal.KafkaProducerMaxAttempts,
+		ReadTimeout:  internal.KafkaProducerReadTimeout,
+		WriteTimeout: internal.KafkaProducerWriteTimeout,
 	}
-	return &Producer{writer: w}, nil
-}
 
-func (p *Producer) Send(key string, value []byte) error {
-	return p.writer.WriteMessages(context.Background(), kafka.Message{
-		Key:   []byte(key),
-		Value: value,
-	})
+	return &Producer{writer: w}, nil
 }
 
 func (p *Producer) SendWithContext(ctx context.Context, key string, value []byte) error {
@@ -32,4 +40,18 @@ func (p *Producer) SendWithContext(ctx context.Context, key string, value []byte
 		Key:   []byte(key),
 		Value: value,
 	})
+}
+
+func (p *Producer) Close(ctx context.Context) error {
+	doneCh := make(chan error, 1)
+	go func() {
+		doneCh <- p.writer.Close()
+	}()
+
+	select {
+	case err := <-doneCh:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

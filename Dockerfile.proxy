@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1
+
+# ── Builder ──────────────────────────────────────────────────────────────────
+FROM golang:1.25-alpine AS builder
+
+WORKDIR /app
+
+# Copy dependency manifests first so Docker cache is reused when only code changes.
+COPY go.mod go.sum ./
+COPY vendor/ vendor/
+
+# Copy source and build a statically-linked binary.
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -mod=vendor -trimpath \
+      -ldflags="-s -w" \
+      -o /out/proxy ./cmd/proxy
+
+# ── Runtime ──────────────────────────────────────────────────────────────────
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=builder /out/proxy /proxy
+
+EXPOSE 8545
+
+ENTRYPOINT ["/proxy"]
+CMD ["proxy", "--port", "8545"]

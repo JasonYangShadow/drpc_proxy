@@ -1,0 +1,411 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: "3"
+
+vars:
+  GO_FLAGS: -mod=vendor
+
+tasks:
+  # ── Docker Compose ──────────────────────────────────────────────────────────
+
+  docker:up:
+    desc: "Start infrastructure: Kafka, Redis, LocalStack"
+    cmds:
+      - docker compose up -d kafka kafka-init redis localstack
+      - task: _network:join
+
+  docker:down:
+    desc: "Stop and remove all local stack containers"
+    cmds:
+      # Remove LocalStack-spawned ECS containers first — they stay attached to the
+      # drpc_proxy_drpc network and prevent docker compose down from removing it.
+      - |
+        LEFTOVER=$(docker ps -aq --filter "name=ls-ecs-drpc-local-" 2>/dev/null)
+        if [ -n "$LEFTOVER" ]; then
+          docker rm -f $LEFTOVER >/dev/null 2>&1 || true
+        fi
+      # Disconnect this devcontainer from the shared network so compose can remove it.
+      - |
+        NETWORK=drpc_proxy_drpc
+        SELF=$(docker network inspect "$NETWORK" --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null \
+          | tr ' ' '\n' | grep -v '^$' | grep -v '^ls-ecs' || true)
+        for C in $SELF; do
+          docker network disconnect "$NETWORK" "$C" 2>/dev/null || true
+        done
+      - docker compose down
+      # Note: the drpc_proxy_drpc network may linger with a "still in use" warning
+      # because the devcontainer itself is attached. This is harmless — compose
+      # reuses the existing network on the next docker:up.
+
+  monitoring:up:
+    desc: "Start Prometheus (port 9090) and Grafana (port 3000)"
+    cmds:
+      - docker compose up -d prometheus-config-init prometheus grafana
+      - echo "Prometheus → http://localhost:9090"
+      - echo "Grafana    → http://localhost:3000"
+      - bash deploy/grafana/setup-grafana.sh
+
+  monitoring:down:
+    desc: "Stop Prometheus and Grafana"
+    cmds:
+      - docker compose stop prometheus grafana
+
+  docker:logs:
+    desc: "Follow logs for all containers (Ctrl-C to stop)"
+    cmds:
+      - docker compose logs -f
+
+  docker:logs:proxy:
+    desc: "Follow logs of all running ECS proxy containers"
+    cmds:
+      - |
+        IDS=$(docker ps -q)
+        [ -z "$IDS" ] && echo "No ECS containers running" && exit 1
+        NAMES=$(docker inspect $IDS 2>/dev/null | python3 -c "import sys,json; cs=json.load(sys.stdin); r=[c['Id'][:12] for c in cs if 'drpc-local-proxy' in c.get('Config',{}).get('Image','')]; print('\n'.join(r))")
+        [ -z "$NAMES" ] && echo "No proxy containers running" && exit 1
+        echo "Following logs for proxy containers:"
+        echo "$NAMES"
+        echo "$NAMES" | xargs -P0 -I{} docker logs -f --timestamps {} &
+        wait
+
+  docker:logs:worker:
+    desc: "Follow logs of all running ECS worker containers"
+    cmds:
+      - |
+        IDS=$(docker ps -q)
+        [ -z "$IDS" ] && echo "No ECS containers running" && exit 1
+        NAMES=$(docker inspect $IDS 2>/dev/null | python3 -c "import sys,json; cs=json.load(sys.stdin); r=[c['Id'][:12] for c in cs if 'drpc-local-worker' in c.get('Config',{}).get('Image','')]; print('\n'.join(r))")
+        [ -z "$NAMES" ] && echo "No worker containers running" && exit 1
+        echo "Following logs for worker containers:"
+        echo "$NAMES"
+        echo "$NAMES" | xargs -P0 -I{} docker logs -f --timestamps {} &
+        wait
+
+  # ── Terraform (LocalStack) ────────────────────────────────────────────────
+
+  local:init:
+    desc: "terraform init for LocalStack — download providers (run once)"
+    deps: [_tf:init]
+
+  local:apply:
+    desc: "Apply Terraform against LocalStack with real worker (auto-approve)"
+    deps: [_tf:local:apply]
+
+  local:apply:mock:
+    desc: "Apply Terraform against LocalStack with mock worker, no real upstream (auto-approve)"
+    cmds:
+      - task: _tf:local:apply
+        vars: { TF_EXTRA_ARGS: "-var worker_mock=true" }
+
+  local:destroy:
+    desc: "Destroy all LocalStack Terraform resources (auto-approve)"
+    deps: [_tf:local:destroy]
+
+  local:push:
+    desc: "Build images and push to LocalStack ECR. Optionally: task local:push IMAGE_TAG=v1.2.3"
+    deps: [_tf:push:local]
+
+  # ── Terraform (real AWS) ──────────────────────────────────────────────────
+
+  infra:init:
+    desc: "terraform init — download providers (run once)"
+    deps: [_tf:init]
+
+  infra:plan:
+    desc: "terraform plan against real AWS"
+    deps: [_tf:plan]
+
+  infra:apply:
+    desc: "terraform apply against real AWS (prompts for confirmation)"
+    deps: [_tf:apply]
+
+  infra:destroy:
+    desc: "terraform destroy real AWS resources (prompts for confirmation)"
+    deps: [_tf:destroy]
+
+  infra:push:
+    desc: "Build images and push to ECR (real AWS). Optionally: task infra:push IMAGE_TAG=v1.2.3"
+    deps: [_tf:push]
+
+  # ── Tests ─────────────────────────────────────────────────────────────────
+
+  test:e2e:
+    desc: "Run e2e tests against a running LocalStack deployment (auto-detects proxy IP)"
+    cmds:
+      - |
+        if [ -n "$PROXY_ADDR" ]; then
+          ADDR="$PROXY_ADDR"
+        else
+          IDS=$(docker ps -q)
+          PROXY_IP=$(docker inspect $IDS 2>/dev/null | python3 -c "import sys,json; cs=json.load(sys.stdin); r=[list(c.get('NetworkSettings',{}).get('Networks',{}).values())[0]['IPAddress'] for c in cs if 'drpc-local-proxy' in c.get('Config',{}).get('Image','') and c.get('NetworkSettings',{}).get('Networks',{})]; print(r[0] if r else '')")
+          [ -z "$PROXY_IP" ] && echo "No proxy container found — run task local:push first" && exit 1
+          ADDR="http://$PROXY_IP:8545"
+        fi
+        echo "Running e2e tests against $ADDR"
+        PROXY_ADDR="$ADDR" go test {{.GO_FLAGS}} -v -tags e2e -timeout 120s ./tests/e2e/
+
+  test:load:
+    desc: "Load test — 5k RPS token-bucket by default; override with USERS/RATE/GAP/DURATION"
+    vars:
+      USERS: '{{.USERS | default "500"}}'
+      RATE: '{{.RATE | default "5000"}}'
+      GAP: '{{.GAP | default "0"}}'
+      DURATION: '{{.DURATION | default "0"}}'
+    cmds:
+      - |
+        if [ -n "$PROXY_ADDR" ]; then
+          ADDR="$PROXY_ADDR"
+        else
+          # Try LocalStack ALB first, fall back to a single proxy container IP
+          ALB_DNS="drpc-local-alb.elb.localhost.localstack.cloud"
+          if curl -sf --max-time 2 "http://$ALB_DNS/health" >/dev/null 2>&1; then
+            ADDR="http://$ALB_DNS"
+            echo "Using LocalStack ALB at $ADDR"
+          else
+            IDS=$(docker ps -q)
+            PROXY_IP=$(docker inspect $IDS 2>/dev/null | python3 -c "import sys,json; cs=json.load(sys.stdin); r=[list(c.get('NetworkSettings',{}).get('Networks',{}).values())[0]['IPAddress'] for c in cs if 'drpc-local-proxy' in c.get('Config',{}).get('Image','') and c.get('NetworkSettings',{}).get('Networks',{})]; print(r[0] if r else '')")
+            [ -z "$PROXY_IP" ] && echo "No proxy container found — run task local:push first" && exit 1
+            ADDR="http://$PROXY_IP:8545"
+            echo "ALB not reachable, using single proxy at $ADDR (run task local:apply to set up the ALB)"
+          fi
+        fi
+        DUR_FLAG=""
+        [ "{{.DURATION}}" != "0" ] && DUR_FLAG="-duration {{.DURATION}}"
+        echo "Load test → $ADDR  users={{.USERS}}  rate={{.RATE}}  gap={{.GAP}}  duration={{.DURATION}}"
+        PROXY_ADDR="$ADDR" go test -v -tags load -timeout 0 ./tests/load/ \
+          -users {{.USERS}} \
+          -rate {{.RATE}} \
+          -gap {{.GAP}} \
+          $DUR_FLAG
+
+  test:manual:
+    desc: "Send a single eth_blockNumber RPC request and poll until result (auto-detects proxy IP)"
+    vars:
+      METHOD: '{{.METHOD | default "eth_blockNumber"}}'
+      PARAMS: '{{.PARAMS | default "[]"}}'
+    cmds:
+      - |
+        # Resolve proxy address
+        if [ -n "$PROXY_ADDR" ]; then
+          ADDR="$PROXY_ADDR"
+        else
+          IDS=$(docker ps -q)
+          PROXY_IP=$(docker inspect $IDS 2>/dev/null | python3 -c "import sys,json; cs=json.load(sys.stdin); r=[list(c.get('NetworkSettings',{}).get('Networks',{}).values())[0]['IPAddress'] for c in cs if 'drpc-local-proxy' in c.get('Config',{}).get('Image','') and c.get('NetworkSettings',{}).get('Networks',{})]; print(r[0] if r else '')")
+          [ -z "$PROXY_IP" ] && echo "No proxy container found — run task local:push first" && exit 1
+          ADDR="http://$PROXY_IP:8545"
+        fi
+        echo "Proxy: $ADDR"
+
+        # Submit request
+        PAYLOAD="{\"jsonrpc\":\"2.0\",\"method\":\"{{.METHOD}}\",\"params\":{{.PARAMS}},\"id\":1}"
+        echo "→ POST $ADDR/rpc  $PAYLOAD"
+        RESPONSE=$(curl -sf -X POST "$ADDR/rpc" \
+          -H 'Content-Type: application/json' \
+          -d "$PAYLOAD")
+        echo "← $RESPONSE"
+        REQUEST_ID=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['request_id'])")
+        echo "  request_id: $REQUEST_ID"
+
+        # Poll until terminal status
+        echo "Polling for result..."
+        for i in $(seq 1 30); do
+          sleep 1
+          RESULT=$(curl -sf "$ADDR/result/?request_id=$REQUEST_ID" || true)
+          STATUS=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null || true)
+          echo "  [$i] status=$STATUS"
+          if [ "$STATUS" = "completed" ] || [ "$STATUS" = "failed" ]; then
+            echo "← Result:"
+            echo "$RESULT" | python3 -m json.tool
+            exit 0
+          fi
+        done
+        echo "Timed out waiting for result"
+        exit 1
+
+  # ============================================================
+  # INTERNAL — hidden from `task --list`
+  # ============================================================
+
+  _network:join:
+    internal: true
+    cmds:
+      - |
+        NETWORK=drpc_proxy_drpc
+        SELF=$(cat /proc/self/mountinfo 2>/dev/null | grep -o '/containers/[a-f0-9]\{64\}' | head -1 | xargs basename 2>/dev/null | cut -c1-12)
+        [ -z "$SELF" ] && SELF=$(cat /proc/1/cpuset 2>/dev/null | grep -o '[a-f0-9]\{64\}' | head -1 | cut -c1-12)
+        [ -z "$SELF" ] && SELF=$(hostname)
+        [ -z "$SELF" ] && exit 0
+        docker network connect "$NETWORK" "$SELF" 2>/dev/null \
+          && echo "Joined Docker network: $NETWORK" \
+          || echo "Already on network: $NETWORK"
+
+  _tf:init:
+    internal: true
+    dir: terraform
+    cmds:
+      - terraform init
+
+  _tf:plan:
+    internal: true
+    dir: terraform
+    cmds:
+      - terraform plan
+
+  _tf:apply:
+    internal: true
+    dir: terraform
+    cmds:
+      - terraform apply
+
+  _tf:destroy:
+    internal: true
+    dir: terraform
+    cmds:
+      # Flush ECR images first — terraform destroy fails on non-empty repositories.
+      - |
+        REGION=$(terraform output -raw aws_region 2>/dev/null || echo "us-east-1")
+        for REPO in \
+          $(aws ecr describe-repositories --region "$REGION" \
+              --query 'repositories[*].repositoryName' --output text 2>/dev/null | tr '\t' '\n' | grep '^drpc-'); do
+          IMAGES=$(aws ecr list-images --region "$REGION" \
+            --repository-name "$REPO" \
+            --query 'imageIds[*]' --output json 2>/dev/null || echo "[]")
+          if [ "$IMAGES" != "[]" ] && [ "$IMAGES" != "null" ] && [ -n "$IMAGES" ]; then
+            echo "Flushing ECR images from $REPO..."
+            aws ecr batch-delete-image --region "$REGION" \
+              --repository-name "$REPO" \
+              --image-ids "$IMAGES" >/dev/null 2>&1 || true
+          fi
+        done
+      # ECS drains tasks automatically on real AWS — no manual scale-down needed.
+      - terraform destroy
+
+  _tf:local:apply:
+    internal: true
+    dir: terraform
+    env:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+    cmds:
+      - terraform init -input=false
+      # LocalStack is ephemeral — wipe any stale state from a previous run
+      # so Terraform recreates all resources from scratch.
+      - |
+        RESOURCES=$(terraform state list 2>/dev/null | tr '\n' ' ')
+        if [ -n "$RESOURCES" ]; then
+          echo "Clearing stale LocalStack state..."
+          terraform state rm $RESOURCES
+        fi
+      - terraform apply -var-file=localstack.tfvars -auto-approve {{.TF_EXTRA_ARGS}}
+      # Force-restart all ECS services so running tasks pick up the new task definition.
+      - |
+        CLUSTER=$(terraform output -raw ecs_cluster_name 2>/dev/null || true)
+        if [ -n "$CLUSTER" ]; then
+          for SVC in $(aws --no-cli-pager --endpoint-url=http://localstack:4566 ecs list-services \
+              --cluster "$CLUSTER" --query 'serviceArns[]' --output text 2>/dev/null); do
+            aws --no-cli-pager --endpoint-url=http://localstack:4566 ecs update-service \
+              --cluster "$CLUSTER" --service "$SVC" --force-new-deployment >/dev/null 2>&1 || true
+          done
+          echo "ECS services redeployed"
+        fi
+
+  _tf:local:destroy:
+    internal: true
+    dir: terraform
+    env:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+    cmds:
+      # Always force-remove any ls-ecs-drpc-local-* containers first — this is
+      # idempotent and ensures cleanup even if terraform destroy fails or was
+      # previously interrupted.
+      - |
+        LEFTOVER=$(docker ps -aq --filter "name=ls-ecs-drpc-local-" 2>/dev/null)
+        if [ -n "$LEFTOVER" ]; then
+          echo "Removing leftover ECS containers..."
+          docker rm -f $LEFTOVER >/dev/null 2>&1 || true
+        fi
+      # Scale services to 0 first so Terraform doesn't hang waiting for task draining.
+      - |
+        CLUSTER=$(terraform output -raw ecs_cluster_name 2>/dev/null || true)
+        if [ -n "$CLUSTER" ]; then
+          for SVC in $(aws --endpoint-url=http://localstack:4566 ecs list-services --cluster "$CLUSTER" --query 'serviceArns[]' --output text 2>/dev/null); do
+            aws --endpoint-url=http://localstack:4566 ecs update-service --cluster "$CLUSTER" --service "$SVC" --desired-count 0 >/dev/null 2>&1 || true
+          done
+        fi
+      # LocalStack ECR ignores force_delete — flush images manually before destroy.
+      - |
+        for REPO in drpc-local-proxy drpc-local-worker; do
+          IMAGES=$(aws --endpoint-url=http://localstack:4566 ecr list-images \
+            --repository-name "$REPO" \
+            --query 'imageIds[*]' --output json 2>/dev/null || echo "[]")
+          if [ "$IMAGES" != "[]" ] && [ -n "$IMAGES" ]; then
+            aws --endpoint-url=http://localstack:4566 ecr batch-delete-image \
+              --repository-name "$REPO" \
+              --image-ids "$IMAGES" >/dev/null 2>&1 || true
+          fi
+        done
+      # LocalStack Secrets Manager may hold secrets past terraform destroy — delete them all.
+      - |
+        SECRETS=$(aws --endpoint-url=http://localstack:4566 secretsmanager list-secrets \
+          --query 'SecretList[].Name' --output text 2>/dev/null || true)
+        for SECRET in $SECRETS; do
+          aws --endpoint-url=http://localstack:4566 secretsmanager delete-secret \
+            --secret-id "$SECRET" --force-delete-without-recovery >/dev/null 2>&1 || true
+        done
+      - terraform destroy -var-file=localstack.tfvars -auto-approve -refresh=false
+
+  _tf:push:
+    internal: true
+    dir: terraform
+    vars:
+      PROXY_URL:
+        sh: terraform output -raw proxy_ecr_repository_url
+      WORKER_URL:
+        sh: terraform output -raw worker_ecr_repository_url
+      REGION:
+        sh: terraform output -raw aws_region 2>/dev/null || echo "us-east-1"
+    cmds:
+      - aws ecr get-login-password --region {{.REGION}} | docker login --username AWS --password-stdin {{.PROXY_URL}}
+      - docker build -f ../Dockerfile.proxy -t {{.PROXY_URL}}:{{.IMAGE_TAG | default "latest"}} ..
+      - docker push {{.PROXY_URL}}:{{.IMAGE_TAG | default "latest"}}
+      - docker build -f ../Dockerfile.worker -t {{.WORKER_URL}}:{{.IMAGE_TAG | default "latest"}} ..
+      - docker push {{.WORKER_URL}}:{{.IMAGE_TAG | default "latest"}}
+
+  _tf:push:local:
+    internal: true
+    dir: terraform
+    env:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+    vars:
+      PROXY_URL:
+        sh: terraform output -raw proxy_ecr_repository_url
+      WORKER_URL:
+        sh: terraform output -raw worker_ecr_repository_url
+    cmds:
+      - aws --endpoint-url=http://localstack:4566 ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin {{.PROXY_URL}}
+      - docker build -f ../Dockerfile.proxy -t {{.PROXY_URL}}:{{.IMAGE_TAG | default "latest"}} ..
+      - docker push {{.PROXY_URL}}:{{.IMAGE_TAG | default "latest"}}
+      - docker build -f ../Dockerfile.worker -t {{.WORKER_URL}}:{{.IMAGE_TAG | default "latest"}} ..
+      - docker push {{.WORKER_URL}}:{{.IMAGE_TAG | default "latest"}}
+      # Force ECS to pull the new images and restart all tasks.
+      # LocalStack doesn't stop old containers on force-new-deployment, so we
+      # remove them first to avoid doubling up.
+      - |
+        LEFTOVER=$(docker ps -aq --filter "name=ls-ecs-drpc-local-" 2>/dev/null)
+        if [ -n "$LEFTOVER" ]; then
+          echo "Removing old ECS containers before redeployment..."
+          docker rm -f $LEFTOVER >/dev/null 2>&1 || true
+        fi
+      - |
+        CLUSTER=$(terraform output -raw ecs_cluster_name 2>/dev/null || true)
+        if [ -n "$CLUSTER" ]; then
+          for SVC in $(aws --endpoint-url=http://localstack:4566 ecs list-services --cluster "$CLUSTER" --query 'serviceArns[]' --output text 2>/dev/null); do
+            aws --endpoint-url=http://localstack:4566 ecs update-service \
+              --cluster "$CLUSTER" --service "$SVC" --force-new-deployment >/dev/null 2>&1 || true
+          done
+          echo "ECS services redeployed"
+        fi

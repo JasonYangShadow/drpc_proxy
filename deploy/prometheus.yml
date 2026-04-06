@@ -1,0 +1,50 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # ── Direct docker-compose containers (stable hostnames) ──────────────────
+  - job_name: 'drpc-proxy'
+    static_configs:
+      - targets: ['drpc-proxy:8545']
+        labels:
+          instance: 'docker-compose'
+
+  - job_name: 'drpc-worker'
+    static_configs:
+      - targets: ['drpc-worker:2112']
+        labels:
+          instance: 'docker-compose'
+
+  # ── LocalStack ECS containers (discovered via Docker socket) ─────────────
+  # Prometheus discovers containers whose image contains 'drpc-local-proxy'
+  # or 'drpc-local-worker' and scrapes them on the appropriate metrics port.
+  - job_name: 'drpc-proxy-ecs'
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 10s
+    relabel_configs:
+      - source_labels: [__meta_docker_container_image]
+        regex: .*drpc-local-proxy.*
+        action: keep
+      - source_labels: [__meta_docker_network_ip]
+        regex: (.+)
+        replacement: '$1:8545'
+        target_label: __address__
+      - source_labels: [__meta_docker_container_name]
+        target_label: instance
+
+  - job_name: 'drpc-worker-ecs'
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 10s
+    relabel_configs:
+      - source_labels: [__meta_docker_container_image]
+        regex: .*drpc-local-worker.*
+        action: keep
+      - source_labels: [__meta_docker_network_ip]
+        regex: (.+)
+        replacement: '$1:2112'
+        target_label: __address__
+      - source_labels: [__meta_docker_container_name]
+        target_label: instance

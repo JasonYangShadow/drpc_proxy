@@ -83,3 +83,28 @@ go.work.sum
 .env
 .env.*
 .envrc
+
+# -----------------------------
+# Terraform
+# -----------------------------
+# Local state files
+**/.terraform/
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Crash and debug logs
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Terraform plan output (may contain secrets)
+*.tfplan
+
+# Sensitive variable files (keep localstack.tfvars since it has no secrets)
+*.auto.tfvars
+secrets.tfvars

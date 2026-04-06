@@ -4,65 +4,105 @@ import (
 	"context"
 	"time"
 
+	"drpc_proxy.com/internal"
 	"github.com/bytedance/sonic"
 	"github.com/redis/go-redis/v9"
 )
 
-type Store struct {
-	client *redis.Client
+// redisClient is the subset of *redis.Client used by Store.
+type redisClient interface {
+	Set(ctx context.Context, key string, value interface{}, expiration time.Duration) *redis.StatusCmd
+	Get(ctx context.Context, key string) *redis.StringCmd
+	Close() error
 }
 
-type Status struct {
-	Status    string `json:"status"`
-	UpdatedAt int64  `json:"updated_at"`
+// pipelineCapable is optionally implemented by the real redis client.
+type pipelineCapable interface {
+	Pipelined(ctx context.Context, fn func(redis.Pipeliner) error) ([]redis.Cmder, error)
+}
+
+type Store struct {
+	client redisClient
 }
 
 func NewStore(addr string) *Store {
 	return &Store{
 		client: redis.NewClient(&redis.Options{
-			Addr: addr,
+			Addr:         addr,
+			PoolSize:     internal.RedisPoolSize,
+			MinIdleConns: internal.RedisMinIdleConns,
+			MaxRetries:   internal.RedisMaxRetries,
+			DialTimeout:  internal.RedisDialTimeout,
+			ReadTimeout:  internal.RedisReadTimeout,
+			WriteTimeout: internal.RedisWriteTimeout,
 		}),
 	}
 }
 
-func (s *Store) Save(id string, data any, ttl time.Duration) error {
-	b, _ := sonic.Marshal(data)
-	return s.client.Set(context.Background(), "rpc:result:"+id, b, ttl).Err()
-}
-
-func (s *Store) SaveWithContext(ctx context.Context, id string, data any, ttl time.Duration) error {
-	b, err := sonic.Marshal(data)
+// SaveResponse stores unified response (status, result, or error)
+func (s *Store) SaveResponse(ctx context.Context, resp *internal.Response, ttl time.Duration) error {
+	resp.UpdatedAt = time.Now().Unix()
+	b, err := sonic.Marshal(resp)
 	if err != nil {
 		return err
 	}
-	return s.client.Set(ctx, "rpc:result:"+id, b, ttl).Err()
+	return s.client.Set(ctx, "rpc:"+resp.RequestID, b, ttl).Err()
 }
 
-func (s *Store) Get(id string) ([]byte, error) {
-	return s.client.Get(context.Background(), "rpc:result:"+id).Bytes()
-}
-
-func (s *Store) GetWithContext(ctx context.Context, id string) ([]byte, error) {
-	return s.client.Get(ctx, "rpc:result:"+id).Bytes()
-}
-
-// SetStatus stores request processing status
-func (s *Store) SetStatus(ctx context.Context, id string, status string, ttl time.Duration) error {
-	st := Status{
-		Status:    status,
-		UpdatedAt: time.Now().Unix(),
+// SaveResponses stores multiple responses in a single pipeline round-trip when
+// the underlying client supports pipelining, otherwise falls back to sequential
+// Set calls (e.g. in tests using a fake client).
+func (s *Store) SaveResponses(ctx context.Context, resps []*internal.Response, ttl time.Duration) error {
+	now := time.Now().Unix()
+	if pc, ok := s.client.(pipelineCapable); ok {
+		_, err := pc.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+			for _, resp := range resps {
+				resp.UpdatedAt = now
+				b, err := sonic.Marshal(resp)
+				if err != nil {
+					return err
+				}
+				pipe.Set(ctx, "rpc:"+resp.RequestID, b, ttl)
+			}
+			return nil
+		})
+		return err
 	}
-	b, _ := sonic.Marshal(&st)
-	return s.client.Set(ctx, "rpc:status:"+id, b, ttl).Err()
+	// Fallback: sequential sets (used by fakes in tests).
+	for _, resp := range resps {
+		resp.UpdatedAt = now
+		b, err := sonic.Marshal(resp)
+		if err != nil {
+			return err
+		}
+		if err := s.client.Set(ctx, "rpc:"+resp.RequestID, b, ttl).Err(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// GetStatus retrieves request processing status
-func (s *Store) GetStatus(ctx context.Context, id string) (*Status, error) {
-	data, err := s.client.Get(ctx, "rpc:status:"+id).Bytes()
+// GetResponse retrieves unified response
+func (s *Store) GetResponse(ctx context.Context, requestID string) (*internal.Response, error) {
+	data, err := s.client.Get(ctx, "rpc:"+requestID).Bytes()
 	if err != nil {
 		return nil, err
 	}
-	var st Status
-	err = sonic.Unmarshal(data, &st)
-	return &st, err
+	var resp internal.Response
+	err = sonic.Unmarshal(data, &resp)
+	return &resp, err
+}
+
+func (s *Store) Close(ctx context.Context) error {
+	doneCh := make(chan error, 1)
+	go func() {
+		doneCh <- s.client.Close()
+	}()
+
+	select {
+	case err := <-doneCh:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

@@ -3,7 +3,16 @@
     "dockerFile": "Dockerfile",
     "features": {
         "ghcr.io/devcontainers/features/go:1": {
-            "version": "1.25"
+            "version": "1.25.8"
+        }
+    },
+    "forwardPorts": [
+        3000
+    ],
+    "portsAttributes": {
+        "3000": {
+            "label": "Grafana",
+            "onAutoForward": "notify"
         }
     },
     "mounts": [
@@ -19,7 +28,8 @@
             "extensions": [
                 "golang.go",
                 "ms-azuretools.vscode-docker",
-                "task.vscode-task"
+                "task.vscode-task",
+                "hashicorp.terraform"
             ]
         }
     },
