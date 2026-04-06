@@ -24,7 +24,7 @@ const (
 	ResultTTL = 10 * time.Minute
 
 	// upstream
-	UpstreamURL                   = "https://polygon-amoy.drpc.org"
+	UpstreamURL                   = "https://polygon.drpc.org"
 	MaxUpstreamRequestSize        = 128 * 1024 // 128KB for the request size
 	MaxUpstreamResponseSize       = 256 * 1024 // 256KB for the response size
 	UpstreamTLSHandshakeTimeout   = 2 * time.Second
